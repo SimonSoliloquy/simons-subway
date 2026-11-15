@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Simon's Subway</title>
+  <link rel="stylesheet" href="/src/style.css" />
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <div id="labels"></div>
+  <div id="tooltip" hidden></div>
+  <div id="board" hidden></div>
+
+  <aside id="left" class="panel">
+    <header>
+      <h1>Simon's Subway <span>NYC Live 3D</span></h1>
+      <div id="status"><span class="dot"></span><span id="status-text">Loading…</span></div>
+    </header>
+    <div class="search">
+      <input id="search" type="search" placeholder="Find a station  ( / )" autocomplete="off" aria-label="Find a station" />
+      <div id="results"></div>
+    </div>
+    <div id="legend" aria-label="Routes"></div>
+    <div class="controls">
+      <label>Layer height <input id="spacing" type="range" min="0" max="1.2" step="0.01" value="0.12" /></label>
+      <label><input id="show-trains" type="checkbox" checked /> Trains</label>
+      <label><input id="show-labels" type="checkbox" checked /> Labels</label>
+      <label><input id="show-waiting" type="checkbox" /> Trains waiting at terminals</label>
+      <button id="overview" class="act">Overview</button>
+    </div>
+    <p class="hint">Drag to orbit · right-drag to pan · scroll to zoom · click a station for live train times · / to search</p>
+  </aside>
+
+  <aside id="right" class="panel">
+    <section id="details" hidden></section>
+    <section id="alerts">
+      <h2>Service alerts <span id="alert-count"></span></h2>
+      <div id="alert-list"></div>
+    </section>
+  </aside>
+
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

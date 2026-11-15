@@ -1,0 +1,20 @@
+{
+  "name": "simons-subway",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "data": "python3 scripts/build_data.py && .venv/bin/python scripts/build_ground.py",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "fetch": "sh scripts/fetch_raw.sh"
+  },
+  "dependencies": {
+    "protobufjs": "^8.8.1",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "vite": "^8.3.8"
+  },
+  "description": "Simon's Subway: a live 3D map of the New York City subway"
+}
