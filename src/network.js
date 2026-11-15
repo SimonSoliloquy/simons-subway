@@ -36,6 +36,55 @@ const distortFlat = (flat) => {
   return out;
 };
 
+// ---------- cleaning and rounding the GTFS shapes ----------
+// GTFS shapes have a vertex only every ~200 m, so bends are angular, and a few fold back on
+// themselves (the N via City Hall runs out to the Canal St bridge platforms and straight back;
+// the 5 folds at 149 St-Grand Concourse). Folds are flattened onto their chord, then every
+// corner is rounded with a short curve. Vertex i of the raw shape maps to vertex
+// roundedIndex(i, n) of the result, so stop positions stay valid.
+const ROUND_K = 5;       // points per rounded corner
+const ROUND_D = 0.3;     // km: how far along each leg a corner's curve may start
+export const roundedIndex = (i, n) => (i <= 0 ? 0 : i >= n - 1 ? (n - 2) * ROUND_K + 1 : 1 + (i - 1) * ROUND_K + 2);
+function flattenFolds(flat) {
+  const n = flat.length / 2;
+  for (let i = 0; i < n - 2; i++) {
+    let arc = 0, best = -1;
+    for (let j = i + 1; j < n; j++) {
+      arc += Math.hypot(flat[2 * j] - flat[2 * j - 2], flat[2 * j + 1] - flat[2 * j - 1]);
+      if (arc > 1.5) break;
+      // the path has turned back on itself (sharper than about 120 degrees): everything in between is a fold
+      if (j >= i + 2 && arc > 0.15 && Math.hypot(flat[2 * j] - flat[2 * i], flat[2 * j + 1] - flat[2 * i + 1]) < 0.5 * arc) best = j;
+    }
+    if (best < 0) continue;
+    for (let k = i + 1; k < best; k++) {
+      const t = (k - i) / (best - i);
+      flat[2 * k] = flat[2 * i] + (flat[2 * best] - flat[2 * i]) * t;
+      flat[2 * k + 1] = flat[2 * i + 1] + (flat[2 * best + 1] - flat[2 * i + 1]) * t;
+    }
+    i = best - 1;
+  }
+}
+function roundCorners(flat) {
+  const n = flat.length / 2;
+  if (n < 3) return flat;
+  const out = new Float32Array(((n - 2) * ROUND_K + 2) * 2);
+  let o = 0;
+  const put = (x, z) => { out[o++] = x; out[o++] = z; };
+  put(flat[0], flat[1]);
+  for (let i = 1; i < n - 1; i++) {
+    const ax = flat[2 * i - 2], az = flat[2 * i - 1], bx = flat[2 * i], bz = flat[2 * i + 1], cx = flat[2 * i + 2], cz = flat[2 * i + 3];
+    const l1 = Math.hypot(ax - bx, az - bz), l2 = Math.hypot(cx - bx, cz - bz);
+    const d1 = l1 ? Math.min(0.45 * l1, ROUND_D) / l1 : 0, d2 = l2 ? Math.min(0.45 * l2, ROUND_D) / l2 : 0;
+    const px = bx + (ax - bx) * d1, pz = bz + (az - bz) * d1, qx = bx + (cx - bx) * d2, qz = bz + (cz - bz) * d2;
+    for (let k = 0; k < ROUND_K; k++) {
+      const t = k / (ROUND_K - 1), u = 1 - t;
+      put(u * u * px + 2 * u * t * bx + t * t * qx, u * u * pz + 2 * u * t * bz + t * t * qz);
+    }
+  }
+  put(flat[2 * n - 2], flat[2 * n - 1]);
+  return out;
+}
+
 export async function loadNetwork() {
   const [net, ground] = await Promise.all([
     fetch(import.meta.env.BASE_URL + 'data/subway.json').then((r) => r.json()),
@@ -74,8 +123,12 @@ export async function loadNetwork() {
 
   // cumulative arc length per shape, for interpolation
   const shapes = new Map();
+  const rawCount = new Map(); // shape id -> vertex count before rounding (for stop indices)
   for (const [id, raw] of Object.entries(net.shapes)) {
-    const flat = distortFlat(raw);
+    const bent = distortFlat(raw);
+    rawCount.set(id, bent.length / 2);
+    flattenFolds(bent);
+    const flat = roundCorners(bent);
     const n = flat.length / 2;
     const cum = new Float32Array(n);
     for (let i = 1; i < n; i++) {
@@ -91,7 +144,8 @@ export async function loadNetwork() {
   const patterns = net.patterns.map(([route, shape, stops, idx, dt, count, night]) => {
     const pos = new Map();
     stops.forEach((s, i) => { if (!pos.has(s)) pos.set(s, i); });
-    return { route, shape, stops, idx, dt, count, night: night || 0, pos };
+    const n = rawCount.get(shape) ?? 0;
+    return { route, shape, stops, idx: n >= 3 ? idx.map((i) => roundedIndex(i, n)) : idx, dt, count, night: night || 0, pos };
   });
   const byRoute = new Map();
   for (const p of patterns) {

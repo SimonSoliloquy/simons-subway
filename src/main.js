@@ -135,11 +135,20 @@ const heightOf = (route) => BASE_Y + laneOf(route).slot * state.spacing;
 // Where trunks share a corridor (E/F/R on Queens Blvd, B/Q on Brighton, F/G on Culver, 2/5 and
 // 3/4) they run side by side: each trunk has a fixed slot, offset by whole line widths.
 const TRUNK_SLOT = new Map();
-for (const [ids, slot] of [[['A', 'C', 'E'], -1], [['B', 'D', 'F', 'FX', 'M'], 0], [['N', 'Q', 'R', 'W'], 1], [['G'], 1], [['J', 'Z'], -1],
+for (const [ids, slot] of [[['A', 'C', 'E'], -1], [['B', 'D', 'F', 'FX', 'M'], 0], [['N', 'Q', 'R', 'W'], 1], [['G'], 1], [['J', 'Z'], 1],
   [['L'], 0], [['GS', 'FS', 'H'], 0], [['1', '2', '3'], -0.5], [['4', '5', '6', '6X'], 0.5], [['7', '7X'], 0]]) ids.forEach((r) => TRUNK_SLOT.set(r, slot));
 const slotOf = (route) => TRUNK_SLOT.get(route) ?? 0;
 const trunkOf = (route) => trunkIndex.get(route) ?? route;
 const SLOT_W = 1.96; // slot spacing in line radii (lines just touch)
+// The sideways direction comes from the line's direction averaged over a stretch of track, not
+// from the nearest segment, so the offset line stays smooth through corners and the two
+// directions of a route land in the same place. Lines, station symbols and trains all use it.
+const SIDE_WINDOW = 0.3; // km either side
+function sideAt(shape, s) {
+  const [x1, z1] = pointAt(shape, s + SIDE_WINDOW), [x0, z0] = pointAt(shape, s - SIDE_WINDOW);
+  const tx = x1 - x0, tz = z1 - z0, l = Math.hypot(tx, tz) || 1;
+  return [-tz / l, tx / l];
+}
 /** Sideways offset (km, positive = right of travel along `sid`) of a route's trunk line. */
 const slotOffset = (route, sid) => slotOf(route) * shapeSign(sid) * SLOT_W * tubeRadius.value;
 
@@ -167,8 +176,9 @@ function buildCrossings() {
   const segs = new Map(), seen = new Set(), CELL = 0.3;
   for (const set of Object.values(routeOffsetLines)) for (const [route, list] of set) {
     const trunk = trunkOf(route);
-    for (const { flat } of list) for (let i = 0; i + 3 < flat.length; i += 2) {
-      const x1 = flat[i], z1 = flat[i + 1], x2 = flat[i + 2], z2 = flat[i + 3];
+    for (const { flat } of list) for (let i = 0; i + 3 < flat.length; i += 10) {
+      const e = Math.min(i + 10, flat.length - 2);
+      const x1 = flat[i], z1 = flat[i + 1], x2 = flat[e], z2 = flat[e + 1];
       const key = `${trunk}|${x1.toFixed(3)},${z1.toFixed(3)},${x2.toFixed(3)},${z2.toFixed(3)}`, rkey = `${trunk}|${x2.toFixed(3)},${z2.toFixed(3)},${x1.toFixed(3)},${z1.toFixed(3)}`;
       if (seen.has(key) || seen.has(rkey)) continue;
       seen.add(key);
@@ -276,7 +286,7 @@ function richText(text) {
 
 // ---------- static scene ----------
 const lineSets = { day: new Map(), night: new Map() };          // route -> Group of tubes
-const routeOffsetLines = { day: new Map(), night: new Map() };  // route -> [{flat centreline, sid}]
+const routeOffsetLines = { day: new Map(), night: new Map() };  // route -> [{sid, shape, a, b, flat}] drawn stretch of each shape
 const routeMats = new Map();
 const groundMats = {};
 // Line thickness follows zoom: thinner up close, a bold map stroke far out.
@@ -295,23 +305,26 @@ function zoomableTube(mat, k = 1) {
 
 /** Tube along a centreline, with a per-vertex sideways unit vector × trunk slot (aSide) so the
  *  shader can set trunks side by side at whatever line width the zoom calls for. */
-function trunkTube(pts, slotSigned, route, radial = 6) {
+function trunkTube(shape, a, b, slotSigned, route, y = 0, radial = 6) {
+  const pts = [];
+  for (let i = a; i <= b; i++) pts.push(new THREE.Vector3(shape.pts[2 * i], y, shape.pts[2 * i + 1]));
+  if (pts.length < 2) return null;
   const curve = new PolylineCurve(pts);
   const segs = Math.min(4000, Math.max(16, Math.round(curve.total / 0.05)));
   const geo = new THREE.TubeGeometry(curve, segs, TUBE_R, radial, false);
   const ring = radial + 1, n = geo.attributes.position.count;
   const side = new Float32Array(n * 3), lift = new Float32Array(n * 2);
-  const trunk = trunkOf(route), rank = trunkRank.get(trunk) ?? 0, pos = geo.attributes.position, c = new THREE.Vector3();
+  const trunk = trunkOf(route), rank = trunkRank.get(trunk) ?? 0, pos = geo.attributes.position;
+  const s0 = shape.cum[a], s1 = shape.cum[b];
   for (let i = 0; i <= segs; i++) {
-    const t = geo.tangents[i], l = Math.hypot(t.x, t.z) || 1;
-    const sx = (-t.z / l) * slotSigned, sz = (t.x / l) * slotSigned;
+    const [sx, sz] = sideAt(shape, s0 + (i / segs) * (s1 - s0));
     // ring centre: where this ring sits on the centreline
-    c.set(0, 0, 0);
-    for (let j = 0; j < radial; j++) { c.x += pos.getX(i * ring + j); c.z += pos.getZ(i * ring + j); }
-    const d = liftDistance(c.x / radial, c.z / radial, trunk);
+    let cx = 0, cz = 0;
+    for (let j = 0; j < radial; j++) { cx += pos.getX(i * ring + j); cz += pos.getZ(i * ring + j); }
+    const d = liftDistance(cx / radial, cz / radial, trunk);
     for (let j = 0; j < ring; j++) {
       const k = i * ring + j;
-      side[k * 3] = sx; side[k * 3 + 2] = sz;
+      side[k * 3] = sx * slotSigned; side[k * 3 + 2] = sz * slotSigned;
       lift[k * 2] = d; lift[k * 2 + 1] = rank;
     }
   }
@@ -377,11 +390,9 @@ function buildLineSet(lines, key) {
     }
     const mat = routeMats.get(route);
     const group = new THREE.Group();
-    for (const { flat, sid } of routeOffsetLines[key].get(route) || []) {
-      const pts = [];
-      for (let i = 0; i < flat.length; i += 2) pts.push(new THREE.Vector3(flat[i], 0, flat[i + 1]));
-      if (pts.length < 2) continue;
-      group.add(new THREE.Mesh(trunkTube(pts, slotOf(route) * shapeSign(sid), route), mat));
+    for (const { sid, shape, a, b } of routeOffsetLines[key].get(route) || []) {
+      const geo = trunkTube(shape, a, b, slotOf(route) * shapeSign(sid), route);
+      if (geo) group.add(new THREE.Mesh(geo, mat));
     }
     group.userData.route = route;
     lineSets[key].set(route, group);
@@ -390,12 +401,26 @@ function buildLineSet(lines, key) {
 }
 function buildLines() {
   // centrelines first, so the crossings are known before the tubes are built
+  // a shape is drawn from its first stop to its last (a few run on past the terminal)
+  const range = new Map();
+  for (const p of net.patterns) {
+    const r = range.get(p.shape) || [Infinity, -Infinity];
+    r[0] = Math.min(r[0], p.idx[0]); r[1] = Math.max(r[1], p.idx[p.idx.length - 1]);
+    range.set(p.shape, r);
+  }
   for (const [key, lines] of [['day', net.lines], ['night', net.nightLines || {}]]) {
     for (const [route, shapeIds] of Object.entries(lines)) {
       if (!net.routes[route]) continue;
-      routeOffsetLines[key].set(route, shapeIds.map((sid) => ({ flat: net.shapes.get(sid)?.pts, sid })).filter((x) => x.flat));
+      routeOffsetLines[key].set(route, shapeIds.map((sid) => {
+        const shape = net.shapes.get(sid);
+        if (!shape) return null;
+        const last = shape.cum.length - 1, r = range.get(sid);
+        const a = r && r[1] > r[0] ? Math.max(0, r[0]) : 0, b = r && r[1] > r[0] ? Math.min(last, r[1]) : last;
+        return { sid, shape, a, b, flat: shape.pts.subarray(2 * a, 2 * b + 2) };
+      }).filter(Boolean));
     }
   }
+  buildExpress();
   buildCrossings();
   buildLineSet(net.lines, 'day');
   buildLineSet(net.nightLines || {}, 'night');
@@ -404,21 +429,34 @@ function buildLines() {
 // Station symbols as on the MTA map: one per trunk line at each station. A black dot is a local
 // stop; a white circle with a black outline is where express trains stop too. The stations of
 // a transfer complex are joined by thin black connector lines.
-/** True where one of `group`'s routes runs express past a stop that another makes next to `id`. */
-function isExpressStop(id, group) {
-  if (group.length < 2) return false;
-  const usable = (r) => { const ps = net.byRoute.get(r) || []; const top = Math.max(1, ...ps.map((p) => p.count)); return ps.filter((p) => p.count >= top * 0.15 && p.pos.has(id)); };
-  for (const r of group) for (const pr of usable(r)) {
-    const next = pr.stops[pr.pos.get(id) + 1];
-    if (!next) continue;
-    for (const q of group) {
-      if (q === r) continue;
-      // q also goes from here to r's next stop, but stops somewhere in between
-      for (const pq of usable(q)) if (pq.pos.has(next) && pq.pos.get(next) > pq.pos.get(id) + 1) return true;
+// A route counts as express along its whole express stretch: from the first place it runs past
+// a stop that another route makes, to the last (so the A is express from 168 St to Euclid Av,
+// the 4 and 5 through Lower Manhattan, the 2 and 3 only between 96 St and Chambers St).
+let expressStops = new Map(); // route -> Set of station ids
+function buildExpress() {
+  const sig = new Map();
+  for (const [r, ps] of net.byRoute) { const top = Math.max(1, ...ps.map((p) => p.count)); sig.set(r, ps.filter((p) => p.count >= top * 0.15)); }
+  expressStops = new Map();
+  for (const [r, ps] of sig) {
+    const set = new Set();
+    expressStops.set(r, set);
+    for (const pr of ps) {
+      let lo = Infinity, hi = -1;
+      for (let i = 0; i + 1 < pr.stops.length; i++) {
+        const a = pr.stops[i], b = pr.stops[i + 1];
+        let skips = false;
+        for (const [q, qs] of sig) {
+          if (q === r) continue;
+          // q also runs from a to b, stopping somewhere in between
+          if (qs.some((pq) => { const ia = pq.pos.get(a), ib = pq.pos.get(b); return ia !== undefined && ib !== undefined && ib > ia + 1; })) { skips = true; break; }
+        }
+        if (skips) { lo = Math.min(lo, i); hi = Math.max(hi, i + 1); }
+      }
+      for (let i = lo; i <= hi; i++) set.add(pr.stops[i]);
     }
   }
-  return false;
 }
+const isExpressStop = (id, group) => group.some((r) => expressStops.get(r)?.has(id));
 let nodeMesh, nodeInner, linkOuter, stationList, nodeList, linkList;
 const nodeLists = { day: [], night: [] }, linkLists = { day: [], night: [] };
 const adaMeshes = {};
@@ -432,14 +470,15 @@ function buildNodes(mode) {
       // nearest point on the trunk's centreline, with the line's sideways direction there
       let bx = st.x, bz = st.z, bd = 0.25 ** 2, sx = 0, sz = 0, sid = null, route = group[0];
       for (const r of group) {
-        for (const { flat, sid: id } of routeOffsetLines[mode].get(r) || routeOffsetLines.day.get(r) || []) {
+        for (const { flat, sid: id, shape, a } of routeOffsetLines[mode].get(r) || routeOffsetLines.day.get(r) || []) {
+          let hit = -1;
           for (let i = 0; i < flat.length; i += 2) {
             const d = (flat[i] - st.x) ** 2 + (flat[i + 1] - st.z) ** 2;
-            if (d >= bd) continue;
-            const j = i + 2 < flat.length ? i : i - 2;
-            const tx = flat[j + 2] - flat[j], tz = flat[j + 3] - flat[j + 1], l = Math.hypot(tx, tz) || 1;
-            bd = d; bx = flat[i]; bz = flat[i + 1]; sx = -tz / l; sz = tx / l; sid = id; route = r;
+            if (d < bd) { bd = d; hit = i; }
           }
+          if (hit < 0) continue;
+          bx = flat[hit]; bz = flat[hit + 1]; sid = id; route = r;
+          [sx, sz] = sideAt(shape, shape.cum[a + hit / 2]);
         }
       }
       const slot = sid ? slotOf(route) * shapeSign(sid) : 0;
@@ -608,7 +647,22 @@ function buildLabels() {
   const major = (st) => st.routes.length >= 4 || /Terminal|Coney Island|Jamaica Center|Flushing|Inwood|Van Cortlandt/.test(st.name);
   const ctx = document.createElement('canvas').getContext('2d');
   ctx.font = '500 11px "Helvetica Neue", Helvetica, Arial, sans-serif';
-  const all = [...net.complexes.values()].map((c) => ({ st: c, major: c.members.some(major) }));
+  // within a transfer complex each differently named station gets its own label beside its own
+  // symbols (Chambers St, Park Place, World Trade Center, Cortlandt St), as on the MTA map
+  const all = [];
+  for (const c of net.complexes.values()) {
+    const byName = new Map();
+    for (const m of c.members) { if (!byName.has(m.name)) byName.set(m.name, []); byName.get(m.name).push(m); }
+    for (const [name, ms] of byName) {
+      const uniq = (f) => [...new Set(ms.flatMap(f))];
+      const st = byName.size === 1 ? c : {
+        id: ms[0].id, name, routes: uniq((m) => m.routes), nightRoutes: uniq((m) => m.nightRoutes),
+        x: ms.reduce((t, m) => t + m.x, 0) / ms.length, z: ms.reduce((t, m) => t + m.z, 0) / ms.length,
+        ada: ms.every((m) => m.ada === 1) ? 1 : ms.every((m) => m.ada === 0) ? 0 : 2,
+      };
+      all.push({ st, major: ms.some(major) || st.routes.length >= 4 });
+    }
+  }
   all.sort((a, b) => (b.major - a.major) || (b.st.routes.length - a.st.routes.length) || a.st.name.localeCompare(b.st.name));
   for (const item of all) add({ ...item, w: ctx.measureText(item.st.name).width + 4 });
   applyLabelModes();
@@ -640,7 +694,7 @@ function updateLabels() {
     _v.project(camera);
     // how far out a label shows: major stations (and accessible ones on the accessible map) from
     // 22 km, every other station from 10 km
-    const range = l.major || (state.ada && adaOf(st)) ? 22 : 10;
+    const range = l.major || (state.ada && st && adaOf(st)) ? 22 : 10;
     const alpha = borough ? Math.min(1, Math.max(0, (dist - 4) / 6)) : Math.min(1, Math.max(0, (range - dist) / (range * 0.3)));
     if (_v.z > 1 || alpha <= 0 || Math.abs(_v.x) > 1.1 || Math.abs(_v.y) > 1.1) { showLabel(l, false); continue; }
     const sx = ((_v.x + 1) / 2) * innerWidth, sy = ((1 - _v.y) / 2) * innerHeight;
@@ -690,8 +744,8 @@ function consistCars(v, trip, len, lenK, n) {
       const c = v.s - (i + 0.5) * L;
       const [xf, zf] = pointAt(v.shape, c + L * 0.35), [xb, zb] = pointAt(v.shape, c - L * 0.35);
       const h = Math.atan2(zf - zb, xf - xb);
-      const mx = (xf + xb) / 2, mz = (zf + zb) / 2;
-      cars.push({ x: mx - Math.sin(h) * off, z: mz + Math.cos(h) * off, y: v.y + trunkLift(mx, mz, trip.route), h });
+      const mx = (xf + xb) / 2, mz = (zf + zb) / 2, [sx, sz] = sideAt(v.shape, c);
+      cars.push({ x: mx + sx * off, z: mz + sz * off, y: v.y + trunkLift(mx, mz, trip.route), h });
     }
   } else {
     for (let i = 0; i < n; i++) {
@@ -738,6 +792,7 @@ function glowTexture(kind) {
   return new THREE.CanvasTexture(c);
 }
 const GLOW_LIFE = 1.6; // s
+const GLOW_SIZE = 3;   // overall size of the arrival ping
 const glowPool = [];
 let glowTex, sparkTex, ringTex;
 function arrivalGlow(trip, shape, s) {
@@ -755,10 +810,10 @@ function arrivalGlow(trip, shape, s) {
     g = { disc: mk(glowTex), ring: mk(ringTex), spark: mk(sparkTex), t: GLOW_LIFE };
     glowPool.push(g);
   }
-  const [x, z, h] = pointAt(shape, s);
+  const [x, z] = pointAt(shape, s), [sx, sz] = sideAt(shape, s);
   const off = trainOffset(trip);
   const y = heightOf(trip.route) + tubeRadius.value * 2;
-  g.disc.position.set(x - Math.sin(h) * off, y, z + Math.cos(h) * off);
+  g.disc.position.set(x + sx * off, y, z + sz * off);
   g.spark.position.copy(g.disc.position);
   g.ring.position.copy(g.disc.position);
   const col = routeColor.get(trip.route) || _w;
@@ -774,12 +829,12 @@ function updateGlows(dt) {
     g.t += dt;
     const k = Math.min(1, g.t / GLOW_LIFE), ease = 1 - (1 - k) ** 3;
     g.disc.visible = g.ring.visible = g.spark.visible = true;
-    g.disc.scale.setScalar(px * (30 + 30 * ease));
+    g.disc.scale.setScalar(px * GLOW_SIZE * (30 + 30 * ease));
     g.disc.material.opacity = 0.6 * (1 - k) ** 1.5;
-    g.ring.scale.setScalar(px * (14 + 62 * ease));
+    g.ring.scale.setScalar(px * GLOW_SIZE * (14 + 62 * ease));
     g.ring.material.opacity = 0.85 * (1 - k) ** 1.4;
     const ks = Math.min(1, g.t / 0.8);
-    g.spark.scale.setScalar(px * 26 * (1 - ks * 0.5));
+    g.spark.scale.setScalar(px * GLOW_SIZE * 26 * (1 - ks * 0.5));
     g.spark.material.opacity = (1 - ks) ** 2;
     g.spark.material.rotation = g.t * 1.5;
   }
@@ -839,8 +894,8 @@ function updateTrains(dt) {
         if (before < at && v.s >= at && visible && v.arrived !== pos.to) { v.arrived = pos.to; arrivalGlow(trip, pos.shape, pos.sNext); }
       }
       const [x, z, h] = pointAt(pos.shape, v.s);
-      const off = trainOffset(trip);
-      v.x = x - Math.sin(h) * off; v.z = z + Math.cos(h) * off;
+      const off = trainOffset(trip), [sx, sz] = sideAt(pos.shape, v.s);
+      v.x = x + sx * off; v.z = z + sz * off;
       v.h = h;
     } else {
       // off-pattern trip: ease toward the next station
@@ -885,12 +940,10 @@ function updatePath() {
   const j = p.pos.get(trip.stus[0].parent);
   const shape = net.shapes.get(p.shape);
   const a = p.idx[Math.max(0, j - 1)], b = p.idx[p.idx.length - 1];
-  const flat = shape.pts.slice(2 * a, 2 * b + 2);
-  const pts = [];
-  for (let i = 0; i < flat.length; i += 2) pts.push(new THREE.Vector3(flat[i], heightOf(trip.route), flat[i + 1]));
-  if (pts.length < 2) return;
+  const geo = trunkTube(shape, a, b, slotOf(trip.route) * shapeSign(p.shape), trip.route, heightOf(trip.route), 8);
+  if (!geo) return;
   pathMesh = new THREE.Mesh(
-    trunkTube(pts, slotOf(trip.route) * shapeSign(p.shape), trip.route, 8),
+    geo,
     zoomableTube(new THREE.MeshBasicMaterial({ color: C.ink, transparent: true, opacity: 0.3 }), 1.9),
   );
   scene.add(pathMesh);
