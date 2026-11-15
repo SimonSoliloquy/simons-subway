@@ -4,6 +4,7 @@
 // through curves. Geometry is built in "car units": length 1 along x, so instances scale by
 // the real car length (51 ft A division, 60 ft B division).
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const H = 0.235, W = 0.169; // R62: 51 ft x 8.6 ft x 12 ft
 const MAX_CARS = 8000;
@@ -80,8 +81,60 @@ function endTexture() {
   });
 }
 
+// Route sign in the lead car's front window: the route bullet (circle, or diamond for express
+// variants) on the dark glass, drawn once per route.
+function signTexture(label, color, text, express) {
+  return canvasTex(128, 128, (g, w, h) => {
+    g.fillStyle = '#0d1114'; g.fillRect(0, 0, w, h);
+    g.fillStyle = color;
+    g.beginPath();
+    if (express) { g.moveTo(w / 2, 6); g.lineTo(w - 6, h / 2); g.lineTo(w / 2, h - 6); g.lineTo(6, h / 2); g.closePath(); }
+    else g.arc(w / 2, h / 2, w * 0.44, 0, Math.PI * 2);
+    g.fill();
+    g.fillStyle = text;
+    g.font = `bold ${label.length > 1 ? 54 : 76}px Helvetica, Arial, sans-serif`;
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.fillText(label, w / 2, h / 2 + 5);
+  });
+}
+
+// Direction arrow on the roof of the lead cars: a chevron pointing the way the train is going.
+function chevronGeometry() {
+  const sh = new THREE.Shape();
+  sh.moveTo(0.5, 0); sh.lineTo(-0.5, 0.5); sh.lineTo(-0.18, 0); sh.lineTo(-0.5, -0.5); sh.closePath();
+  return new THREE.ShapeGeometry(sh).rotateX(-Math.PI / 2);
+}
+
 export class TrainRenderer {
-  constructor(scene) {
+  /** routeInfo(route) -> {label, color, text, express} for the front-window sign. */
+  constructor(scene, routeInfo) {
+    this.scene = scene;
+    this.routeInfo = routeInfo;
+    this.signs = new Map(); // route -> {front, rear, side} InstancedMeshes with that route's sign
+    // Route signs at true size on the model: in the front window of the lead car, the rear
+    // window of the last car, and a small sign in a side window near each end of every car.
+    const SZ = W * 0.4, SIDE = 0.042, y = H * 0.7;
+    this.signGeo = {
+      front: new THREE.PlaneGeometry(SZ, SZ).rotateY(Math.PI / 2).translate(0.5025, y, 0),
+      rear: new THREE.PlaneGeometry(SZ, SZ).rotateY(-Math.PI / 2).translate(-0.5025, y, 0),
+      side: mergeGeometries([
+        new THREE.PlaneGeometry(SIDE, SIDE).translate(0.36, y, W / 2 + 0.004),
+        new THREE.PlaneGeometry(SIDE, SIDE).rotateY(Math.PI).translate(-0.36, y, -W / 2 - 0.004),
+      ]),
+    };
+    this.signMax = { front: 600, rear: 600, side: MAX_CARS };
+    // route-colour stripe: a belt band along both sides at the window sill, and a strip down the
+    // middle of the roof (what you see from above); the rest of the car stays stainless
+    const band = () => new THREE.BoxGeometry(0.97, H * 0.09, 0.006);
+    const stripeGeo = mergeGeometries([
+      band().translate(0, H * 0.56, W / 2 + 0.003),
+      band().translate(0, H * 0.56, -W / 2 - 0.003),
+      new THREE.BoxGeometry(0.9, 0.006, W * 0.34).translate(0, H + 0.015, 0),
+    ]);
+    this.stripe = new THREE.InstancedMesh(stripeGeo, new THREE.MeshBasicMaterial({ color: 0xffffff }), MAX_CARS);
+    const chev = chevronGeometry();
+    this.arrowEdge = new THREE.InstancedMesh(chev, new THREE.MeshBasicMaterial({ color: 0xffffff }), 3000);
+    this.arrow = new THREE.InstancedMesh(chev, new THREE.MeshBasicMaterial({ color: 0xffffff }), 3000); // coloured per train
     const side = new THREE.MeshStandardMaterial({ map: sideTexture(), metalness: 0.55, roughness: 0.38 });
     const end = new THREE.MeshStandardMaterial({ map: endTexture(), metalness: 0.3, roughness: 0.5 });
     const roof = new THREE.MeshStandardMaterial({ color: 0x8f969d, metalness: 0.4, roughness: 0.6 });
@@ -90,8 +143,7 @@ export class TrainRenderer {
     this.body = new THREE.InstancedMesh(bodyGeo, [end, end, roof, under, side, side], MAX_CARS);
     // roof panel (grey; red when delayed, black when selected) + lit route sign on the leading end
     this.roof = new THREE.InstancedMesh(new THREE.BoxGeometry(0.9, 0.012, W * 0.7).translate(0, H + 0.006, 0), new THREE.MeshLambertMaterial({ color: 0xffffff }), MAX_CARS);
-    this.sign = new THREE.InstancedMesh(new THREE.BoxGeometry(0.012, 0.05, 0.07).translate(0.5, H * 0.78, 0), new THREE.MeshBasicMaterial({ color: 0xffffff }), 3000);
-    for (const m of [this.body, this.roof, this.sign]) {
+    for (const m of [this.body, this.roof, this.stripe, this.arrow, this.arrowEdge]) {
       m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       m.frustumCulled = false;
       m.count = 0;
@@ -100,10 +152,35 @@ export class TrainRenderer {
     this._m = new THREE.Matrix4(); this._q = new THREE.Quaternion(); this._p = new THREE.Vector3(); this._s = new THREE.Vector3();
     this._up = new THREE.Vector3(0, 1, 0);
   }
-  begin() { this.nc = 0; this.ns = 0; }
+  begin() { this.nc = 0; this.na = 0; for (const set of this.signs.values()) for (const m of Object.values(set)) m.count = 0; }
+  signMesh(route) {
+    let set = this.signs.get(route);
+    if (!set) {
+      const info = this.routeInfo(route);
+      const mat = new THREE.MeshBasicMaterial({ map: signTexture(info.label, info.color, info.text, info.express) });
+      set = {};
+      for (const k of ['front', 'rear', 'side']) {
+        const m = new THREE.InstancedMesh(this.signGeo[k], mat, this.signMax[k]);
+        m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        m.frustumCulled = false;
+        m.count = 0;
+        this.scene.add(m);
+        set[k] = m;
+      }
+      this.signs.set(route, set);
+    }
+    return set;
+  }
+  putSign(m, k, tint) {
+    if (m.count >= this.signMax[k]) return;
+    m.setMatrixAt(m.count, this._m); m.setColorAt(m.count, tint); m.count++;
+  }
   /** cars: [{x,y,z,h}] lead car first; len: real car length (km); girth: cross-section multiplier;
-   *  tall: extra height on top of girth, so trains stand up from the line in a tilted view. */
-  add(cars, len, lenK, girth, color, signColor, tall = 1) {
+   *  tall: extra height on top of girth, so trains stand up from the line in a tilted view;
+   *  route: for the front sign; tint: sign tint (white, or red when delayed);
+   *  arrow: {len, width, color} of the direction chevron on the lead cars' roof (km);
+   *  stripe: route colour for the side and roof stripe. */
+  add(cars, len, lenK, girth, color, route, tint, tall = 1, arrow = null, stripe = null) {
     for (let i = 0; i < cars.length && this.nc < MAX_CARS; i++) {
       const c = cars[i];
       this._q.setFromAxisAngle(this._up, -c.h);
@@ -111,14 +188,36 @@ export class TrainRenderer {
       this.body.setMatrixAt(this.nc, this._m);
       this.roof.setMatrixAt(this.nc, this._m);
       this.roof.setColorAt(this.nc, color);
+      this.stripe.setMatrixAt(this.nc, this._m);
+      this.stripe.setColorAt(this.nc, stripe || color);
       this.nc++;
-      if (i === 0 && this.ns < 3000) { this.sign.setMatrixAt(this.ns, this._m); this.sign.setColorAt(this.ns, signColor); this.ns++; }
+      const set = this.signMesh(route);
+      this.putSign(set.side, 'side', tint);
+      if (i === 0) this.putSign(set.front, 'front', tint);
+      if (i === cars.length - 1) this.putSign(set.rear, 'rear', tint);
+    }
+    const c = cars[0];
+    if (arrow && c && this.na < 3000) {
+      // tip at the front of the train, lying on the roof of the lead car(s)
+      const L = len * lenK, fx = Math.cos(c.h), fz = Math.sin(c.h);
+      const back = L / 2 - arrow.len * 0.6; // just behind the cab end
+      const top = c.y + len * girth * tall * (H + 0.02); // above the roof strip
+      const e = arrow.width * 0.02;
+      this._q.setFromAxisAngle(this._up, -c.h);
+      this._p.set(c.x + fx * back, top + e, c.z + fz * back);
+      this._m.compose(this._p, this._q, this._s.set(arrow.len * 1.18, 1, arrow.width * 1.2));
+      this.arrowEdge.setMatrixAt(this.na, this._m);
+      this._p.y = top + 2 * e;
+      this._m.compose(this._p, this._q, this._s.set(arrow.len, 1, arrow.width));
+      this.arrow.setMatrixAt(this.na, this._m);
+      this.arrow.setColorAt(this.na, arrow.color);
+      this.na++;
     }
   }
   end() {
-    this.body.count = this.roof.count = this.nc;
-    this.sign.count = this.ns;
-    for (const m of [this.body, this.roof, this.sign]) {
+    this.body.count = this.roof.count = this.stripe.count = this.nc;
+    this.arrow.count = this.arrowEdge.count = this.na;
+    for (const m of [this.body, this.roof, this.stripe, this.arrow, this.arrowEdge, ...[...this.signs.values()].flatMap(Object.values)]) {
       m.instanceMatrix.needsUpdate = true;
       if (m.instanceColor) m.instanceColor.needsUpdate = true;
     }
