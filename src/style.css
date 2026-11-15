@@ -27,6 +27,18 @@ html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
 #left { left: 16px; width: 280px; }
 #right { right: 16px; width: 340px; }
 #right #alerts h2 { margin-top: 0; }
+/* collapsible panels: the menu folds to its title band, the right panel to its status bar */
+#left:not([open]) { padding-bottom: 0; }
+#left > summary { list-style: none; cursor: pointer; display: block; }
+#left > summary::-webkit-details-marker { display: none; }
+#left > summary:focus-visible { outline: 3px solid var(--ada); outline-offset: -3px; }
+#left header { padding-right: 44px; }
+#left .toggle { position: absolute; right: 14px; top: 50%; width: 20px; height: 20px; margin-top: -10px; }
+#left .toggle::before, #left .toggle::after { content: ""; position: absolute; left: 3px; right: 3px; top: 9px; height: 2px; background: #fff; transition: transform .15s; }
+#left:not([open]) .toggle::after { transform: rotate(90deg); }
+#right { padding-bottom: 0; }
+#right:has(#service[open]) { padding-bottom: 14px; }
+#service > summary { min-height: 40px; }
 #left header { background: #111; color: #fff; margin: 0 -16px 0; padding: 14px 16px 12px; border-top: 6px solid #111; position: relative; }
 #left header::before { content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1px; background: #fff; opacity: .9; }
 h1 { font-size: 22px; margin: 0 0 6px; letter-spacing: -0.02em; font-weight: 700; }
@@ -109,8 +121,14 @@ h3 { margin: 0; font-size: 16px; }
 #tooltip .row { display: flex; gap: 3px; margin-top: 4px; flex-wrap: wrap; }
 
 @media (max-width: 760px) {
-  #left { left: 8px; right: 8px; top: 8px; width: auto; max-height: 34%; }
-  #right { left: 8px; right: 8px; top: auto; bottom: 40px; width: auto; max-height: 34%; }
+  #left { left: 8px; right: 8px; top: 8px; width: auto; max-height: calc(100% - 140px); }
+  #left header { padding: 10px 52px 9px 14px; }
+  #left h1 { font-size: 18px; margin-bottom: 3px; }
+  #left .toggle { right: 12px; width: 28px; height: 28px; margin-top: -14px; }
+  #left .toggle::before, #left .toggle::after { left: 4px; right: 4px; top: 13px; }
+  #right { left: 8px; right: 8px; top: auto; bottom: 30px; width: auto; max-height: 50%; }
+  #board { display: none; } /* the station card below shows the same times */
+  #service > summary { min-height: 44px; }
   .hint { display: none; }
 }
 
@@ -205,10 +223,13 @@ h3 .isa { width: 18px; height: 18px; vertical-align: -3px; }
 
 /* MTA terms: permanent attribution line */
 #disclaimer {
-  position: fixed; left: 312px; right: 372px; bottom: 0; width: fit-content; margin: 0 auto; z-index: 2;
+  position: fixed; left: 16px; right: 16px; bottom: 0; width: fit-content; margin: 0 auto; z-index: 2;
   background: #fff; color: #444; font-size: 11px; line-height: 1.3; padding: 4px 10px; text-align: center;
 }
+/* keep the attribution clear of an open panel */
+body:has(#left[open]) #disclaimer { left: 312px; }
+body:has(#service[open]) #disclaimer, body:has(#details:not([hidden])) #disclaimer { right: 372px; }
 @media (max-width: 760px) {
-  #disclaimer { left: 0; right: 0; width: auto; font-size: 10px; padding: 3px 8px; }
+  #disclaimer, body:has(#left[open]) #disclaimer, body:has(#service[open]) #disclaimer, body:has(#details:not([hidden])) #disclaimer { left: 0; right: 0; width: auto; font-size: 10px; padding: 3px 8px; }
 }
 .result .rn { display: flex; align-items: center; gap: 4px; }

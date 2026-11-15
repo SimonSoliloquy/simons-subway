@@ -12,12 +12,15 @@
   <div id="tooltip" hidden></div>
   <div id="board" hidden></div>
 
-  <aside id="left" class="panel">
-    <header>
-      <h1>Simon's Subway <span>NYC Live 3D</span></h1>
-      <div id="status"><span class="dot"></span><span id="status-text">Loading…</span></div>
-      <div id="mode-caption" hidden></div>
-    </header>
+  <details id="left" class="panel">
+    <summary aria-label="Menu">
+      <header>
+        <h1>Simon's Subway <span>NYC Live 3D</span></h1>
+        <div id="status"><span class="dot"></span><span id="status-text">Loading…</span></div>
+        <div id="mode-caption" hidden></div>
+        <span class="toggle" aria-hidden="true"></span>
+      </header>
+    </summary>
     <details id="finder" class="search">
       <summary>Find a station <kbd>/</kbd></summary>
       <input id="search" type="search" placeholder="Station name" autocomplete="off" aria-label="Find a station" />
@@ -34,18 +37,18 @@
       <button id="overview" class="act">Overview</button>
     </div>
     <p class="hint">Drag to orbit · right-drag to pan · scroll to zoom · click a station for live train times · / to search</p>
-  </aside>
+  </details>
 
   <aside id="right" class="panel">
     <section id="details" hidden></section>
     <details id="service">
       <summary><span class="sumtitle">Service status</span> <span id="status-summary"></span></summary>
       <div id="status-box"></div>
+      <section id="alerts">
+        <h2>Service alerts <span id="alert-count"></span></h2>
+        <div id="alert-list"></div>
+      </section>
     </details>
-    <section id="alerts">
-      <h2>Service alerts <span id="alert-count"></span></h2>
-      <div id="alert-list"></div>
-    </section>
   </aside>
 
   <footer id="disclaimer">Not affiliated with or endorsed by the MTA. Data obtained from MTA feeds and may not be accurate, complete or timely.</footer>

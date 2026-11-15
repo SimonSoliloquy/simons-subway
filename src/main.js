@@ -102,6 +102,7 @@ let atHome = false;
 addEventListener('resize', () => {
   if (!innerWidth || !innerHeight) return;
   camera.aspect = innerWidth / innerHeight;
+  if (viewShift) camera.setViewOffset(innerWidth, innerHeight, 0, viewShift, innerWidth, innerHeight);
   camera.updateProjectionMatrix();
   renderer.setSize(innerWidth, innerHeight);
   if (atHome && stationList) {
@@ -112,6 +113,7 @@ addEventListener('resize', () => {
   }
 });
 
+const menuEl = $('#left'), serviceEl = $('#service');
 // ---------- helpers ----------
 let net;
 let nightSet = new Set();          // routes with late-night service
@@ -193,16 +195,19 @@ function buildGround() {
       for (const h of rings.slice(1)) shape.holes.push(new THREE.Path(toV(h)));
       return new THREE.ShapeGeometry(shape).rotateX(-Math.PI / 2);
     });
-    groundMats[key] = new THREE.MeshBasicMaterial({ color: PALETTE.day[key], fog: true });
+    groundMats[key] = new THREE.MeshBasicMaterial({ color: PALETTE.day[key], fog: true, depthTest: false, depthWrite: false });
     const mesh = new THREE.Mesh(mergeGeometries(geos), groundMats[key]);
     mesh.position.y = y;
-    mesh.renderOrder = order;
+    mesh.renderOrder = order - 10;
     scene.add(mesh);
   };
-  groundMats.water = new THREE.MeshBasicMaterial({ color: PALETTE.day.water });
+  // The ground layers are a few metres apart, far below depth-buffer precision at city scale, so
+  // they are painted in order (water, land, parks) with no depth test; everything else sits above.
+  groundMats.water = new THREE.MeshBasicMaterial({ color: PALETTE.day.water, depthTest: false, depthWrite: false });
   const water = new THREE.Mesh(new THREE.PlaneGeometry(600, 600), groundMats.water);
   water.rotation.x = -Math.PI / 2;
   water.position.y = -0.01;
+  water.renderOrder = -10;
   scene.add(water);
   layer(net.ground.land, 'land', 0, 1);
   layer(net.ground.parks, 'park', 0.002, 2);
@@ -477,16 +482,20 @@ function updateTrains(dt) {
       // Drive along the real track: speed is chosen so the train reaches its next station at
       // the predicted arrival time (faster when behind the estimate, slower when ahead), and
       // the train holds still when the feed says it has stopped moving.
+      // New feed data often moves the estimate; a train that is behind speeds up to catch it
+      // and one that is ahead waits, so trains never jump. Only a large error snaps.
       const fresh = v.shape !== pos.shape || v.s === undefined;
-      if (fresh || Math.abs(v.s - pos.sEst) > 2.5 || v.s > pos.sNext + 0.05 || (pos.sPrev !== undefined && v.s < pos.sPrev - 0.3)) {
+      const behind = pos.sEst - v.s;
+      if (fresh || behind > 3 || behind < -1.5) {
         v.shape = pos.shape; v.s = pos.sEst; v.speed = 0;
       } else {
         const left = pos.sNext - v.s;
         const stalled = trip.vehicle?.ts && state.feedTime - trip.vehicle.ts > 90;
         const timeLeft = pos.state === 'moving' ? Math.max(4, pos.arr - now) : 3;
-        const want = left <= 0 || stalled ? 0 : Math.min(VMAX, left / timeLeft);
+        let want = left <= 0 || stalled ? 0 : Math.min(VMAX, left / timeLeft);
+        if (behind > 0.05 && left > 0) want = Math.min(left / 2, Math.max(want, behind / 6)); // close the gap in ~6 s
         v.speed += (want - v.speed) * Math.min(1, dt * 1.5); // ease acceleration
-        v.s = Math.min(pos.sNext, v.s + v.speed * dt * state.timeScale);
+        if (v.s < pos.sNext) v.s = Math.min(pos.sNext, v.s + v.speed * dt * state.timeScale);
       }
       const [x, z, h] = pointAt(pos.shape, v.s);
       const off = laneOf(trip.route).off * shapeSign(trip.pattern.shape);
@@ -505,10 +514,9 @@ function updateTrains(dt) {
     // cars about as wide as their line, which far out is wider than the zoom factor alone gives
     const girth = Math.max(lenK * 2, (tubeRadius.value * 1.9) / (0.169 * len));
     _c.set(waiting ? 0xe4e6e8 : 0x9aa1a8);
-    if (trip.delayed && (now * 2) % 2 < 1) _c.set(0xdc4d4a);
     if (sel) _c.set(C.ink);
     _sc.copy(routeColor.get(trip.route) || _w);
-    if (trip.delayed && (now * 2) % 2 < 1) _sc.set(0xdc4d4a);
+    if (trip.delayed) _sc.set(0xdc4d4a);
     trainRenderer.add(consistCars(v, trip, len, lenK), len, lenK, girth * (sel ? 1.3 : 1), _c, _sc);
     drawnTrains.push(trip.id);
   }
@@ -837,9 +845,10 @@ function computeHome() {
     u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v);
   }
   let left = 0, right = innerWidth;
+  // fit between the panels that are open (collapsed, they only cover the top corners)
   if (innerWidth > 760) {
-    left = $('#left').getBoundingClientRect().right + 8;
-    right = $('#right').getBoundingClientRect().left - 8;
+    if (menuEl.open) left = menuEl.getBoundingClientRect().right + 8;
+    if (serviceEl.open || state.selected) right = $('#right').getBoundingClientRect().left - 8;
   }
   // too narrow a gap: fit the full width, then slide toward the gap as far as the screen allows
   const fitW = right - left >= innerWidth * 0.3 ? right - left : innerWidth, margin = 1.06;
@@ -887,7 +896,7 @@ function select(sel, { fly = false } = {}) {
 
 // ---------- station search ----------
 const searchEl = $('#search'), resultsEl = $('#results'), finderEl = $('#finder');
-function openFinder() { finderEl.open = true; searchEl.focus(); }
+function openFinder() { menuEl.open = true; finderEl.open = true; searchEl.focus(); }
 function closeFinder() { searchEl.value = ''; runSearch(); searchEl.blur(); finderEl.open = false; }
 finderEl.addEventListener('toggle', () => { if (finderEl.open) searchEl.focus(); });
 const norm = (x) => x.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -975,6 +984,16 @@ function updateHover() {
   tooltip.style.top = pointer.y + 14 + 'px';
 }
 
+// ---------- collapsible panels (all start closed) ----------
+const narrow = () => innerWidth <= 760;
+for (const [el, other] of [[menuEl, serviceEl], [serviceEl, menuEl]]) {
+  el.addEventListener('toggle', () => {
+    if (el.open && narrow()) other.open = false; // one panel at a time on a phone
+  });
+}
+// on a phone, touching the map tucks the panels away
+canvas.addEventListener('pointerdown', () => { if (narrow()) menuEl.open = serviceEl.open = false; });
+
 // ---------- controls ----------
 $('#spacing').addEventListener('input', (e) => { state.spacing = +e.target.value; layoutLines(); updatePath(); });
 $('#show-trains').addEventListener('change', (e) => { state.showTrains = e.target.checked; });
@@ -1052,12 +1071,30 @@ async function refreshOutages() {
   } catch (err) { console.error(err); }
 }
 
+// On a phone the station card covers the lower half of the screen, so the view is lifted
+// (camera view offset) to put the orbit target in the middle of the map that is still visible.
+let viewShift = 0;
+const detailsEl = $('#details');
+function updateViewOffset() {
+  const want = innerWidth <= 760 && !detailsEl.hidden ? Math.round($('#right').getBoundingClientRect().height / 2) : 0;
+  if (Math.abs(want - viewShift) < 0.5) return;
+  viewShift += (want - viewShift) * 0.15;
+  if (Math.abs(want - viewShift) < 0.5) viewShift = want;
+  if (viewShift) camera.setViewOffset(innerWidth, innerHeight, 0, viewShift, innerWidth, innerHeight);
+  else camera.clearViewOffset();
+}
+
 // ---------- zoom-dependent sizing ----------
 function updateZoom() {
+  updateViewOffset();
   const dist = camera.position.distanceTo(controls.target);
+  // near plane follows the zoom: a fixed 50 m near plane leaves too little depth precision at
+  // city scale and the overlapping lines shimmer
+  const near = Math.min(1, Math.max(0.002, dist * 0.01));
+  if (Math.abs(near - camera.near) / camera.near > 0.05) { camera.near = near; camera.updateProjectionMatrix(); }
   const k = Math.min(10, Math.max(0.35, dist / 3));
   const wpp = (2 * dist * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2))) / innerHeight;
-  if (state.wpp && Math.abs(k - state.zoomK) / state.zoomK < 0.015 && Math.abs(wpp - state.wpp) / state.wpp < 0.015) return;
+  if (state.wpp && Math.abs(k - state.zoomK) / state.zoomK < 0.004 && Math.abs(wpp - state.wpp) / state.wpp < 0.004) return;
   state.zoomK = k;
   state.wpp = wpp;
   // far out, parallel services touch like the map's bands, and lines never get thinner than ~3 px
