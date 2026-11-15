@@ -16,17 +16,21 @@
     <header>
       <h1>Simon's Subway <span>NYC Live 3D</span></h1>
       <div id="status"><span class="dot"></span><span id="status-text">Loading…</span></div>
+      <div id="mode-caption" hidden></div>
     </header>
-    <div class="search">
-      <input id="search" type="search" placeholder="Find a station  ( / )" autocomplete="off" aria-label="Find a station" />
+    <details id="finder" class="search">
+      <summary>Find a station <kbd>/</kbd></summary>
+      <input id="search" type="search" placeholder="Station name" autocomplete="off" aria-label="Find a station" />
       <div id="results"></div>
-    </div>
+    </details>
     <div id="legend" aria-label="Routes"></div>
     <div class="controls">
-      <label>Layer height <input id="spacing" type="range" min="0" max="1.2" step="0.01" value="0.12" /></label>
+      <label>Layer height <input id="spacing" type="range" min="0" max="1.2" step="0.01" value="0" /></label>
       <label><input id="show-trains" type="checkbox" checked /> Trains</label>
       <label><input id="show-labels" type="checkbox" checked /> Labels</label>
       <label><input id="show-waiting" type="checkbox" /> Trains waiting at terminals</label>
+      <label><input id="late-night" type="checkbox" /> Late night service</label>
+      <label><input id="accessible" type="checkbox" /> Accessible stations</label>
       <button id="overview" class="act">Overview</button>
     </div>
     <p class="hint">Drag to orbit · right-drag to pan · scroll to zoom · click a station for live train times · / to search</p>
@@ -34,11 +38,17 @@
 
   <aside id="right" class="panel">
     <section id="details" hidden></section>
+    <details id="service">
+      <summary><span class="sumtitle">Service status</span> <span id="status-summary"></span></summary>
+      <div id="status-box"></div>
+    </details>
     <section id="alerts">
       <h2>Service alerts <span id="alert-count"></span></h2>
       <div id="alert-list"></div>
     </section>
   </aside>
+
+  <footer id="disclaimer">Not affiliated with or endorsed by the MTA. Data obtained from MTA feeds and may not be accurate, complete or timely.</footer>
 
   <script type="module" src="/src/main.js"></script>
 </body>

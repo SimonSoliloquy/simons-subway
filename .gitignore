@@ -7,3 +7,5 @@ dist/
 # raw downloads (re-fetch with `npm run fetch`); keep the NYCT realtime reference
 raw/*
 !raw/mta-gtfs-rt-reference.pdf
+.vercel
+.env*

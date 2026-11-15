@@ -1,0 +1,6 @@
+raw
+.venv
+node_modules
+dist
+scripts
+.git

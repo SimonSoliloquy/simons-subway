@@ -10,7 +10,7 @@ const MAX_CARS = 8000;
 const FT = 0.0003048; // km
 
 // consist lengths (best guesses at typical current consists)
-const CONSIST = { GS: [6, 51], FS: [2, 75], H: [4, 75], SI: [4, 75], G: [5, 75], L: [8, 60], '7': [11, 51], '7X': [11, 51] };
+const CONSIST = { GS: [6, 51], FS: [2, 75], H: [4, 75], G: [5, 75], L: [8, 60], '7': [11, 51], '7X': [11, 51] };
 const A_DIV = new Set(['1', '2', '3', '4', '5', '6', '6X']);
 export function consistOf(route) {
   const [n, ft] = CONSIST[route] || (A_DIV.has(route) ? [10, 51] : [10, 60]);

@@ -1,13 +1,16 @@
 :root {
   /* MTA subway map (mta.info/map/5341): black title band, white panels, Helvetica */
-  --bg: #c8d6ed;
+  --bg: #c8d6ed;    /* water; switched with the late-night palette */
+  --land: #f9f0e3;
+  --ada: #155e9b;   /* MTA accessibility blue */
+  --warn: #f3d255;
   --panel: #ffffff;
   --border: #e3e0d8;
   --text: #111111;
   --muted: #6b6b6b;
   --accent: #111111;
-  --bad: #dc4c4a;
-  --ok: #4aa363;
+  --bad: #dc4d4a;
+  --ok: #459b5e;
   font: 13px/1.4 "Helvetica Neue", Helvetica, Arial, system-ui, sans-serif;
   color: var(--text);
 }
@@ -33,7 +36,9 @@ h3 { margin: 0; font-size: 16px; }
 
 #status { display: flex; align-items: center; gap: 6px; color: #bdbdbd; font-size: 12px; }
 #status .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-#status.live .dot { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+#status.live .dot { background: var(--ok); }
+#status.stale .dot { background: var(--warn); }
+#mode-caption { margin-top: 8px; padding-top: 8px; border-top: 1px solid #333; font-size: 12px; font-weight: 700; color: #fff; }
 #status.error .dot { background: var(--bad); }
 
 #legend { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0; }
@@ -50,6 +55,11 @@ h3 { margin: 0; font-size: 16px; }
 .bullet.express > span { transform: rotate(-45deg); }
 .bullet.wide { width: auto; padding: 0 6px; border-radius: 13px; font-size: 11px; }
 #legend.focused .bullet:not(.on) { opacity: .25; }
+/* routes with no late-night service: dimmed and struck through */
+.bullet { position: relative; }
+.bullet.off { opacity: .3; }
+.bullet.off::after { content: ""; position: absolute; left: -3px; right: -3px; top: 50%; height: 2px; margin-top: -1px; background: #111; transform: rotate(-45deg); }
+.bullet.express.off::after { transform: none; }
 #legend .bullet:hover { transform: scale(1.1); }
 #legend .bullet.express:hover { transform: rotate(45deg) scale(.95); }
 
@@ -83,8 +93,12 @@ h3 { margin: 0; font-size: 16px; }
 #labels { position: fixed; inset: 0; pointer-events: none; z-index: 1; overflow: hidden; }
 .label {
   position: absolute; left: 0; top: 0; white-space: nowrap; font-size: 11px; font-weight: 500; color: #111;
-  text-shadow: 0 0 2px #f9f0e3, 0 0 3px #f9f0e3, 0 0 5px #f9f0e3; will-change: transform; transform-origin: 0 50%;
+  text-shadow: 0 0 2px var(--land), 0 0 3px var(--land), 0 0 5px var(--land); will-change: transform; transform-origin: 0 50%;
 }
+.label.dim { color: #8a8c8e; }
+/* accessible-stations map: accessible station names boxed, as on the MTA map */
+.label.acc { background: #fff; border: 1px solid #111; padding: 1px 4px; text-shadow: none; display: flex; align-items: center; gap: 3px; }
+.label .isa { width: 12px; height: 12px; }
 .label.borough {
   font-size: 26px; font-weight: 700; color: #939597; text-shadow: none; letter-spacing: -0.01em;
 }
@@ -95,8 +109,8 @@ h3 { margin: 0; font-size: 16px; }
 #tooltip .row { display: flex; gap: 3px; margin-top: 4px; flex-wrap: wrap; }
 
 @media (max-width: 760px) {
-  #left { left: 8px; right: 8px; top: 8px; width: auto; max-height: 38%; }
-  #right { left: 8px; right: 8px; top: auto; bottom: 8px; width: auto; max-height: 40%; }
+  #left { left: 8px; right: 8px; top: 8px; width: auto; max-height: 34%; }
+  #right { left: 8px; right: 8px; top: auto; bottom: 40px; width: auto; max-height: 34%; }
   .hint { display: none; }
 }
 
@@ -134,3 +148,67 @@ tr.click, .brow.click { cursor: pointer; }
 #board .brow:last-child { padding-bottom: 8px; }
 #tooltip .trow { display: flex; align-items: center; gap: 4px; margin-top: 4px; font-variant-numeric: tabular-nums; }
 #tooltip .trow > span:not(.bullet) { margin-right: 6px; }
+#tooltip .isa { width: 14px; height: 14px; }
+.warn-dot { width: 0; height: 0; border-left: 7px solid transparent; border-right: 7px solid transparent; border-bottom: 12px solid var(--warn); flex: none; }
+
+/* International Symbol of Access */
+.isa { width: 16px; height: 16px; vertical-align: -3px; flex: none; }
+.isa rect { fill: var(--ada); stroke: var(--ada); stroke-width: 1.5; }
+.isa circle { fill: #fff; }
+.isa path { fill: none; stroke: #fff; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.isa.partial rect { fill: #fff; }
+.isa.partial circle { fill: var(--ada); }
+.isa.partial path { stroke: var(--ada); }
+.isa.inline { width: 13px; height: 13px; }
+h3 .isa { width: 18px; height: 18px; vertical-align: -3px; }
+
+/* station accessibility */
+#details .ada-line { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 3px 0; border-top: 1px solid var(--border); }
+#details .ada-routes { display: flex; gap: 2px; }
+#details .outages { list-style: none; margin: 4px 0 0; padding: 0; }
+#details .outages li { padding: 4px 0 4px 8px; border-left: 4px solid var(--border); margin-bottom: 4px; }
+#details .outages li.el { border-left-color: var(--warn); }
+#details .upcoming { margin-top: 4px; }
+.stale { color: #8a6d00; font-weight: 700; }
+
+/* service status box: one row per trunk, coloured only by severity */
+/* collapsible sections: station finder and service status (closed on load) */
+#finder > summary, #service > summary {
+  list-style: none; cursor: pointer; display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 12px;
+}
+#finder > summary::-webkit-details-marker, #service > summary::-webkit-details-marker { display: none; }
+#finder > summary::after, #service > summary::after { content: "+"; margin-left: auto; font-size: 16px; line-height: 1; font-weight: 400; }
+#finder[open] > summary::after, #service[open] > summary::after { content: "\2212"; }
+#finder > summary { border: 2px solid #000; padding: 7px 10px; color: #000; }
+#finder > summary:focus-visible, #service > summary:focus-visible { outline: 3px solid var(--ada); outline-offset: -3px; }
+#finder kbd { font: inherit; font-weight: 400; color: var(--muted); border: 1px solid var(--border); padding: 0 5px; }
+#finder[open] > summary { border-bottom: 0; }
+#service > summary { color: #fff; background: #111; margin: 0 -16px; padding: 10px 16px; }
+#service[open] > summary { margin-bottom: 10px; }
+.sumtitle { white-space: nowrap; }
+#status-summary { font-weight: 400; color: #d6d6d6; }
+#status-summary.severe { color: #fff; }
+#status-summary.severe::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 5px; vertical-align: 0; }
+#alerts { margin-top: 14px; }
+#status-box { margin-bottom: 14px; }
+#status-box .trunk { border-top: 1px solid var(--border); padding: 4px 0; }
+#status-box .trunk:first-child { border-top: 0; }
+#status-box .seg { display: flex; align-items: center; gap: 8px; padding: 2px 0; }
+#status-box .sbs { display: flex; gap: 3px; flex: none; width: 96px; }
+#status-box .stext { font-size: 12px; }
+#status-box .seg.none .stext { color: var(--muted); }
+#status-box .seg.planned .stext, #status-box .seg.notice .stext { color: var(--text); }
+#status-box .seg.severe .stext { color: var(--bad); font-weight: 700; }
+#status-box .bullet.on { outline: 2px solid #111; outline-offset: 1px; }
+#status-box.focused .bullet:not(.on) { opacity: .35; }
+.agroup { font-weight: 700; font-size: 12px; padding: 8px 0 2px; }
+
+/* MTA terms: permanent attribution line */
+#disclaimer {
+  position: fixed; left: 312px; right: 372px; bottom: 0; width: fit-content; margin: 0 auto; z-index: 2;
+  background: #fff; color: #444; font-size: 11px; line-height: 1.3; padding: 4px 10px; text-align: center;
+}
+@media (max-width: 760px) {
+  #disclaimer { left: 0; right: 0; width: auto; font-size: 10px; padding: 3px 8px; }
+}
+.result .rn { display: flex; align-items: center; gap: 4px; }

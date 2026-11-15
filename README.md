@@ -20,25 +20,44 @@ To rebuild it: `npm run fetch` (downloads the sources into `raw/`), then `npm ru
 
 ## Data
 
-- **Static** — `raw/gtfs_subway.zip` (MTA static GTFS, https://rrgtfsfeeds.s3.amazonaws.com/gtfs_subway.zip);
-  ground layers from NYC Open Data (`gthc-hcne` boroughs, `enfh-gkve` parks, `6dic-zdhf` airports)
-  and US Census `cb_2023_us_county_500k` for the neighbouring NJ / NY shoreline. `npm run data`
-  regenerates `public/data/subway.json` and `public/data/ground.json` (needs `pyshp` in `.venv`).
-- **Realtime** — the eight `nyct/gtfs-*` trip feeds and `camsys/subway-alerts`, fetched directly
-  from the browser (public, no key, CORS open) and decoded with protobufjs using the protos in
-  `public/proto/` (`gtfs-realtime-NYCT.proto` for trips, `gtfs-realtime-service-status.proto`
-  for alerts; they need separate roots because both claim extension 1001).
+- **Static** (`npm run fetch`, then `npm run data`):
+  - MTA regular subway GTFS (`gtfs_subway.zip`): the lines drawn, station routes and late-night
+    service (trips starting 00:30–04:30). As on the MTA map, the standard map shows a route at a stop
+    only with at least 6 scheduled daytime (7 AM–7 PM) trips there, so late-night-only stops (the 2
+    at 86 St) and one-off moves (an R to 96 St) are left off; live trains on them are still placed.
+  - MTA supplemented GTFS (`gtfs_supplemented.zip`, refreshed hourly by the MTA with the next seven
+    days of service changes): extra stopping patterns so rerouted live trains can be placed. Where a
+    reroute's stops do not lie on its shape (the MTA often gives it the usual shape, or none), the
+    build stitches a shape from the regular track between each pair of stops.
+  - NY Open Data `39hk-dx4f` (station accessibility) and the MTA elevator/escalator equipment list.
+  - Ground layers: NYC Open Data (`gthc-hcne` boroughs, `enfh-gkve` parks, `6dic-zdhf` airports) and
+    US Census `cb_2023_us_county_500k` for the neighbouring shoreline (needs `pyshp` in `.venv`).
+  - Staten Island Railway is deliberately left out.
+- **Realtime**, all through this site's own relay `api/mta.js` (a Vercel function; the same handler
+  is mounted by Vite in development). The MTA data-feed terms do not allow an app to hand end users
+  data straight from MTA servers, so the browser never calls the MTA directly.
+  - Trips: the seven v2 subway feeds (`nyct-v2/gtfs…`), polled every 15 s. v2 lists the stops a
+    train has already made with actual times.
+  - Alerts: `camsys/subway-alerts` (protobuf with Mercury extensions), every 30 s. Line status
+    follows the MTA "service status box" rule: the highest-ranked active alert per line.
+  - Elevator and escalator outages: `nyct/nyct_ene.json`, every 2 min.
+  - Protos are in `public/proto/` (`gtfs-realtime-NYCT.proto` for trips,
+    `gtfs-realtime-service-status.proto` for alerts; separate roots, both claim extension 1001).
 - `raw/mta-gtfs-rt-reference.pdf` is the NYCT GTFS-realtime reference (mta.info document 134521).
+  Feed changes are announced on the MTA developer Google Group and in `nymta/gtfs-documentation`.
+
+Not affiliated with or endorsed by the MTA. The MTA asks for a licence to use its logos, maps and
+symbols in public apps; this project uses none of its artwork or logo, but the styling follows its map.
 
 ## How train positions are estimated
 
-NYCT feeds carry no coordinates, only the remaining stops with predicted times
-(`raw/mta-gtfs-rt-reference.pdf`). Each live trip is matched to a static stopping pattern by its
-stop sequence (live trip_ids often don't match the schedule). The train then drives along the real
-track shape at whatever speed gets it to the next station at the predicted arrival time: faster when
-behind the estimate, slower when ahead, capped at ~90 km/h, and it holds still once the
-VehiclePosition timestamp is over 90 s old (the MTA's own "not moving" rule). See
-`placeTrip` in `src/network.js` and `updateTrains` in `src/main.js`.
+NYCT feeds carry no coordinates, only stops and times. Each live trip is matched to a static
+stopping pattern by its stop sequence (live trip ids often don't match the schedule). The train
+then drives along the real track shape from the station it last left (actual departure time, from
+the v2 feed) toward the next one, at whatever speed gets it there at the predicted arrival time:
+faster when behind the estimate, slower when ahead, capped at ~90 km/h. It holds still once the
+VehiclePosition timestamp is over 90 s old (the MTA's own "not moving" rule). See `placeTrip` in
+`src/network.js` and `updateTrains` in `src/main.js`.
 
 ## Scale
 

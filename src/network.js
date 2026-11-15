@@ -8,8 +8,9 @@ export async function loadNetwork() {
   ]);
 
   const stations = new Map();
-  for (const [id, [name, x, z, routes, complex]] of Object.entries(net.stations)) {
-    if (routes.length) stations.set(id, { id, name, x, z, routes, complex });
+  for (const [id, [name, x, z, routes, complex, nightRoutes, ada, adaNorth, adaSouth, adaNotes]] of Object.entries(net.stations)) {
+    // stations with no routes (e.g. Staten Island Railway, not part of this map) are dropped
+    if (routes.length) stations.set(id, { id, name, x, z, routes, complex, nightRoutes: nightRoutes || [], ada: ada || 0, adaNorth: adaNorth || 0, adaSouth: adaSouth || 0, adaNotes: adaNotes || '' });
   }
   // station complexes: one "station" on the map, possibly several GTFS parent stations
   const complexes = new Map();
@@ -20,9 +21,18 @@ export async function loadNetwork() {
   for (const c of complexes.values()) {
     const names = new Map();
     for (const m of c.members) names.set(m.name, (names.get(m.name) || 0) + 1);
-    c.name = [...names].sort((a, b) => b[1] - a[1])[0][0];
+    // the name most members share; when none leads (Bleecker St + Broadway-Lafayette St), all of
+    // them, busiest platform first, so the complex isn't named after just one of its stations
+    const ranked = [...names].sort((a, b) => b[1] - a[1]);
+    if (ranked.length > 1 && ranked[0][1] === ranked[1][1]) {
+      const routesOf = (name) => Math.max(...c.members.filter((m) => m.name === name).map((m) => m.routes.length));
+      c.name = ranked.map(([n]) => n).sort((a, b) => routesOf(b) - routesOf(a)).join(' / ');
+    } else c.name = ranked[0][0];
     c.ids = new Set(c.members.map((m) => m.id));
     c.routes = [...new Set(c.members.flatMap((m) => m.routes))].sort((a, b) => (net.routes[a]?.sort ?? 99) - (net.routes[b]?.sort ?? 99));
+    c.nightRoutes = c.routes.filter((r) => c.members.some((m) => m.nightRoutes.includes(r)));
+    // accessibility of the complex: 1 = every part fully accessible, 0 = none, 2 = partly
+    c.ada = c.members.every((m) => m.ada === 1) ? 1 : c.members.every((m) => m.ada === 0) ? 0 : 2;
     c.x = c.members.reduce((t, m) => t + m.x, 0) / c.members.length;
     c.z = c.members.reduce((t, m) => t + m.z, 0) / c.members.length;
   }
@@ -39,10 +49,10 @@ export async function loadNetwork() {
     shapes.set(id, { pts: flat, cum });
   }
 
-  const patterns = net.patterns.map(([route, shape, stops, idx, dt, count]) => {
+  const patterns = net.patterns.map(([route, shape, stops, idx, dt, count, night]) => {
     const pos = new Map();
     stops.forEach((s, i) => { if (!pos.has(s)) pos.set(s, i); });
-    return { route, shape, stops, idx, dt, count, pos };
+    return { route, shape, stops, idx, dt, count, night: night || 0, pos };
   });
   const byRoute = new Map();
   for (const p of patterns) {
@@ -50,32 +60,46 @@ export async function loadNetwork() {
     byRoute.get(p.route).push(p);
   }
 
-  return { origin: net.origin, routes: net.routes, lines: net.lines, stations, complexes, shapes, patterns, byRoute, ground };
+  return {
+    origin: net.origin, routes: net.routes, lines: net.lines, nightLines: net.nightLines || {},
+    elevators: net.elevators || {}, meta: net.meta || {},
+    stations, complexes, shapes, patterns, byRoute, ground,
+  };
 }
 
-const FAMILY = { '6X': '6', '7X': '7', FX: 'F', SS: 'SI' };
+const FAMILY = { '6X': '6', '7X': '7', FX: 'F' };
 
-function score(p, parents) {
-  let i = p.pos.get(parents[0]);
-  if (i === undefined) return -1;
-  let s = 1;
-  for (let n = 1; n < parents.length && n < 8; n++) {
-    const q = p.stops.indexOf(parents[n], i + 1);
+// How well a static stopping pattern explains a live trip: the stop it is heading for must be
+// on the pattern; then count upcoming stops found in order after it, and (v2 feeds) the last
+// few stops already made found in order before it.
+function score(p, past, future) {
+  const j = p.pos.get(future[0]);
+  if (j === undefined) return -1;
+  let s = 1, i = j;
+  for (let n = 1; n < future.length && n < 10; n++) {
+    const q = p.stops.indexOf(future[n], i + 1);
+    if (q < 0) break;
+    s++; i = q;
+  }
+  i = j;
+  for (let n = past.length - 1; n >= 0 && n >= past.length - 4 && i > 0; n--) {
+    const q = p.stops.lastIndexOf(past[n], i - 1);
     if (q < 0) break;
     s++; i = q;
   }
   return s;
 }
 
-/** Choose the static stopping pattern that best explains a live trip's remaining stops. */
+/** Choose the static stopping pattern that best explains a live trip's stops. */
 export function matchPattern(net, trip) {
-  const parents = trip.stus.map((s) => s.parent);
+  const future = trip.stus.map((s) => s.parent);
+  const past = (trip.past || []).map((s) => s.parent);
   const pick = (cands) => {
     let best = null, bs = 0;
     for (const p of cands) {
-      const s = score(p, parents);
+      const s = score(p, past, future);
       // prefer more matched stops, then patterns where the next stop has a predecessor, then popularity
-      const k = s * 1e7 + (p.pos.get(parents[0]) > 0 ? 1e6 : 0) + p.count;
+      const k = s * 1e7 + (p.pos.get(future[0]) > 0 ? 1e6 : 0) + p.count;
       if (s > 0 && k > bs) { bs = k; best = p; }
     }
     return best;
@@ -135,9 +159,9 @@ export function pointAt(shape, s) {
  * For matched trips it also returns arc-length targets on the shape so the renderer can
  * drive the train smoothly: `sEst` (best guess right now) and `sNext` (next station, to be
  * reached at time `arr`).
- * NYCT feeds carry no coordinates, so we interpolate between the previous station and the
- * next one (the first stop_time_update), using the predicted arrival time and the scheduled
- * running time of that segment.
+ * NYCT feeds carry no coordinates, so we interpolate between the last station the train made
+ * and the next one: from its actual departure time (v2 feeds) to the predicted arrival, or
+ * with the scheduled running time when the departure is unknown.
  */
 export function placeTrip(net, trip, now) {
   const next = trip.stus[0];
@@ -149,16 +173,27 @@ export function placeTrip(net, trip, now) {
   }
   const j = p.pos.get(next.parent);
   const shape = net.shapes.get(p.shape);
+  const prev = trip.past?.at(-1); // last stop actually made (v2 feeds), with its real departure time
   const stoppedHere = trip.vehicle?.status === 'STOPPED_AT' && trip.vehicle.parent === next.parent;
   const sNext = shape.cum[p.idx[j]];
   if (j === 0 || stoppedHere) {
     const [x, z, h] = alongShape(shape, p.idx[j], p.idx[j], 0);
-    return { x, z, h, state: j === 0 && !stoppedHere ? 'origin' : 'stopped', from: null, to: next.parent, shape, sEst: sNext, sNext, arr: now };
+    return { x, z, h, state: j === 0 && !stoppedHere && !prev ? 'origin' : 'stopped', from: null, to: next.parent, shape, sEst: sNext, sNext, arr: now };
   }
-  const run = Math.max(30, p.dt[j - 1]);
-  const remaining = next.arr - now;
-  const frac = Math.min(1, Math.max(0, 1 - remaining / run));
-  const [x, z, h] = alongShape(shape, p.idx[j - 1], p.idx[j], frac);
-  const sPrev = shape.cum[p.idx[j - 1]];
-  return { x, z, h, state: 'moving', from: p.stops[j - 1], to: next.parent, frac, shape, sEst: sPrev + frac * (sNext - sPrev), sPrev, sNext, arr: next.arr };
+  // the segment runs from the stop the train last made (if it is on this pattern) to the next one
+  let jp = j - 1;
+  if (prev) { const q = p.stops.lastIndexOf(prev.parent, j - 1); if (q >= 0) jp = q; }
+  const left = prev && p.stops[jp] === prev.parent ? prev.dep : 0;
+  let frac;
+  if (left && next.arr > left) {
+    frac = (now - left) / (next.arr - left); // real departure -> predicted arrival
+  } else {
+    let run = 0;
+    for (let i = jp; i < j; i++) run += p.dt[i];
+    frac = 1 - (next.arr - now) / Math.max(30, run); // scheduled running time
+  }
+  frac = Math.min(1, Math.max(0, frac));
+  const [x, z, h] = alongShape(shape, p.idx[jp], p.idx[j], frac);
+  const sPrev = shape.cum[p.idx[jp]];
+  return { x, z, h, state: 'moving', from: p.stops[jp], to: next.parent, frac, shape, sEst: sPrev + frac * (sNext - sPrev), sPrev, sNext, arr: next.arr };
 }
