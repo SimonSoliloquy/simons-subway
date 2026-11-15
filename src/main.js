@@ -143,8 +143,8 @@ const SLOT_W = 1.96; // slot spacing in line radii (lines just touch)
 /** Sideways offset (km, positive = right of travel along `sid`) of a route's trunk line. */
 const slotOffset = (route, sid) => slotOf(route) * shapeSign(sid) * SLOT_W * tubeRadius.value;
 
-// ---------- over and under crossings ----------
-// Where two trunk lines cross, one passes over the other, as drawn on the MTA map (read off
+// ---------- which line is drawn on top at crossings ----------
+// Where two trunk lines cross, one is drawn over the other, as on the MTA map (read off
 // Weekday_2026-04-03). The map has no single stacking order, so there is a default order
 // (bottom to top) plus the places where the map does it differently.
 const CROSS_ORDER = [['L'], ['G'], ['1', '2', '3'], ['N', 'Q', 'R', 'W'], ['4', '5', '6', '6X'], ['J', 'Z'], ['A', 'C', 'E'], ['B', 'D', 'F', 'FX', 'M'], ['GS', 'FS', 'H'], ['7', '7X']];
@@ -225,11 +225,13 @@ function liftDistance(x, z, trunk) {
   }
   return best;
 }
-// the hump: a smooth rise over about five line widths; higher-ranked trunks rise a little more,
-// so two raised lines that meet still stack in the default order (same formula as the shader)
+// The lines are flat: the line drawn on top at a crossing is raised by only a hairline (a few
+// percent of the line's thickness, more for higher-ranked trunks), enough to fix which colour
+// shows on top without any visible hump (same formula as the shader).
+const LIFT_BASE = 0.06, LIFT_RANK = 0.02;
 const liftHeight = (d, rank) => {
   const r = tubeRadius.value, t = Math.min(1, Math.max(0, 1 - d / Math.max(0.25, 5 * r)));
-  return t * t * (3 - 2 * t) * r * (2.2 + 0.25 * rank);
+  return t * t * (3 - 2 * t) * r * (LIFT_BASE + LIFT_RANK * rank);
 };
 /** Height a trunk's line (and its trains) is raised at a point. */
 const trunkLift = (x, z, route) => { const k = trunkOf(route); return liftHeight(liftDistance(x, z, k), trunkRank.get(k) ?? 0); };
@@ -286,7 +288,7 @@ function zoomableTube(mat, k = 1) {
     sh.vertexShader = 'uniform float uRadius;\nattribute vec3 aSide;\nattribute vec2 aLift;\n' + sh.vertexShader.replace('#include <begin_vertex>',
       `vec3 transformed = position + normal * (uRadius * ${k.toFixed(2)} - ${TUBE_R.toFixed(4)}) + aSide * (${SLOT_W.toFixed(2)} * uRadius);
       float liftT = clamp(1.0 - aLift.x / max(0.25, 5.0 * uRadius), 0.0, 1.0);
-      transformed.y += liftT * liftT * (3.0 - 2.0 * liftT) * uRadius * (2.2 + 0.25 * aLift.y);`);
+      transformed.y += liftT * liftT * (3.0 - 2.0 * liftT) * uRadius * (${LIFT_BASE} + ${LIFT_RANK} * aLift.y);`);
   };
   return mat;
 }
@@ -595,15 +597,20 @@ function buildLabels() {
     el.textContent = item.borough ? item.borough.name : item.st.name;
     el.style.display = 'none';
     host.appendChild(el);
+    if (item.st && !item.major) el.classList.add('minor');
     labelEls.push({ el, shown: false, ...item });
   };
   for (const b of net.ground.labels) if (b.name !== 'Staten Island') add({ borough: b });
-  // one label per station complex (Union Sq's three platforms would otherwise be labelled three times)
+  // One label per station complex (Union Sq's three platforms would otherwise be labelled three
+  // times), for every station. Major stations show from further out; the rest appear as you
+  // zoom in. Busier stations are placed first and a label that would overlap one already
+  // placed is left out until there is room.
   const major = (st) => st.routes.length >= 4 || /Terminal|Coney Island|Jamaica Center|Flushing|Inwood|Van Cortlandt/.test(st.name);
-  for (const c of net.complexes.values()) {
-    if (c.members.some(major)) add({ st: c });
-    else if (c.ada) add({ st: c, adaOnly: true });
-  }
+  const ctx = document.createElement('canvas').getContext('2d');
+  ctx.font = '500 11px "Helvetica Neue", Helvetica, Arial, sans-serif';
+  const all = [...net.complexes.values()].map((c) => ({ st: c, major: c.members.some(major) }));
+  all.sort((a, b) => (b.major - a.major) || (b.st.routes.length - a.st.routes.length) || a.st.name.localeCompare(b.st.name));
+  for (const item of all) add({ ...item, w: ctx.measureText(item.st.name).width + 4 });
   applyLabelModes();
 }
 const adaOf = (st) => st.ada || 0;
@@ -618,22 +625,38 @@ function applyLabelModes() {
 }
 const _v = new THREE.Vector3();
 function showLabel(l, on) { if (l.shown !== on) { l.shown = on; l.el.style.display = on ? '' : 'none'; } }
+const placedLabels = [];
 function updateLabels() {
   const show = state.showLabels;
+  placedLabels.length = 0;
+  // start the text clear of the station symbol, whatever size it is at this zoom
+  const gap = Math.min(22, (tubeRadius.value * 1.7) / (state.wpp || 1)) + 4;
   for (const l of labelEls) {
     const { el, st, borough } = l;
-    if (!show || (l.adaOnly && !state.ada)) { showLabel(l, false); continue; }
+    if (!show) { showLabel(l, false); continue; }
     if (borough) _v.set(borough.pos[0], 0, borough.pos[1]);
     else _v.set(st.x, (st.members ? complexTop(st) : stationTop(st)) + 0.08, st.z);
     const dist = _v.distanceTo(camera.position);
     _v.project(camera);
-    const alpha = borough ? Math.min(1, Math.max(0, (dist - 4) / 6)) : Math.min(1, Math.max(0, (22 - dist) / 8));
+    // how far out a label shows: major stations (and accessible ones on the accessible map) from
+    // 22 km, every other station from 10 km
+    const range = l.major || (state.ada && adaOf(st)) ? 22 : 10;
+    const alpha = borough ? Math.min(1, Math.max(0, (dist - 4) / 6)) : Math.min(1, Math.max(0, (range - dist) / (range * 0.3)));
     if (_v.z > 1 || alpha <= 0 || Math.abs(_v.x) > 1.1 || Math.abs(_v.y) > 1.1) { showLabel(l, false); continue; }
+    const sx = ((_v.x + 1) / 2) * innerWidth, sy = ((1 - _v.y) / 2) * innerHeight;
+    if (!borough) {
+      // leave out a label that would overlap one already placed (busier stations come first)
+      const x0 = sx + gap - 2, y0 = sy - 9, x1 = x0 + l.w + (state.ada && adaOf(st) ? 26 : 2), y1 = sy + 9;
+      let clash = false;
+      for (const r of placedLabels) if (x0 < r[2] && x1 > r[0] && y0 < r[3] && y1 > r[1]) { clash = true; break; }
+      if (clash) { showLabel(l, false); continue; }
+      placedLabels.push([x0, y0, x1, y1]);
+    }
     showLabel(l, true);
     el.style.opacity = alpha;
     el.style.transform = borough
-      ? `translate(${((_v.x + 1) / 2) * innerWidth}px, ${((1 - _v.y) / 2) * innerHeight}px) translate(-50%, -50%)`
-      : `translate(${((_v.x + 1) / 2) * innerWidth + 8}px, ${((1 - _v.y) / 2) * innerHeight - 7}px)`;
+      ? `translate(${sx}px, ${sy}px) translate(-50%, -50%)`
+      : `translate(${sx + gap}px, ${sy - 7}px)`;
   }
 }
 
