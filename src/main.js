@@ -88,6 +88,15 @@ controls.maxPolarAngle = Math.PI * 0.49;
 controls.minDistance = 0.04;
 controls.maxDistance = 120;
 controls.screenSpacePanning = false;
+// map-style controls: drag (one finger) moves the map, right-drag (two fingers) turns and tilts
+// the view, scroll or pinch zooms
+controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE };
+// Rotation settles quickly so it stops where it is let go; panning keeps its soft glide.
+const ROTATING = new Set([0, 3, 6]); // OrbitControls states: ROTATE, TOUCH_ROTATE, TOUCH_DOLLY_ROTATE
+function tuneDamping() {
+  if (controls.state !== -1) controls.dampingFactor = ROTATING.has(controls.state) ? 0.3 : 0.05;
+}
 
 // lighting kept near 1.0 on top faces so route colours render at their true values
 scene.add(new THREE.HemisphereLight(0xffffff, 0xcfc6b0, 0.75));
@@ -951,10 +960,19 @@ function pick(cx, cy) {
 let pointer = null, downAt = null;
 canvas.addEventListener('pointermove', (e) => { pointer = { x: e.clientX, y: e.clientY }; });
 canvas.addEventListener('pointerleave', () => { pointer = null; tooltip.hidden = true; });
-canvas.addEventListener('pointerdown', (e) => { downAt = { x: e.clientX, y: e.clientY }; flight = null; });
+// a tap selects only if it was a single finger (a two-finger rotate or pinch never selects)
+const touching = new Set();
+let multiTouch = false;
+canvas.addEventListener('pointerdown', (e) => {
+  touching.add(e.pointerId);
+  if (touching.size === 1) multiTouch = false; else multiTouch = true;
+  downAt = { x: e.clientX, y: e.clientY }; flight = null;
+});
+for (const ev of ['pointerup', 'pointercancel']) canvas.addEventListener(ev, (e) => { queueMicrotask(() => touching.delete(e.pointerId)); });
 canvas.addEventListener('wheel', () => { flight = null; }, { passive: true });
 controls.addEventListener('start', () => { atHome = false; if (state.follow) { state.follow = false; renderDetails(); } });
 canvas.addEventListener('pointerup', (e) => {
+  if (e.button !== 0 || multiTouch) return; // right-click turns the view; only a plain click or tap selects
   if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5) return;
   const hit = pick(e.clientX, e.clientY);
   select(hit, { fly: !!hit });
@@ -1119,6 +1137,7 @@ function frame() {
       camera.position.add(delta);
     }
   }
+  tuneDamping();
   controls.update();
   updateLabels();
   updateHover();
@@ -1158,7 +1177,7 @@ async function start() {
   if (import.meta.env.DEV) {
     window.__subway = {
       state, trainView, get trains() { return trainRenderer; }, camera, controls, net, select, setNight, setAda, goHome,
-      step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
+      step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
     };
   }
   frame();
