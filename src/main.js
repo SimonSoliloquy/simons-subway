@@ -142,6 +142,106 @@ const trunkOf = (route) => trunkIndex.get(route) ?? route;
 const SLOT_W = 1.96; // slot spacing in line radii (lines just touch)
 /** Sideways offset (km, positive = right of travel along `sid`) of a route's trunk line. */
 const slotOffset = (route, sid) => slotOf(route) * shapeSign(sid) * SLOT_W * tubeRadius.value;
+
+// ---------- over and under crossings ----------
+// Where two trunk lines cross, one passes over the other, as drawn on the MTA map (read off
+// Weekday_2026-04-03). The map has no single stacking order, so there is a default order
+// (bottom to top) plus the places where the map does it differently.
+const CROSS_ORDER = [['L'], ['G'], ['1', '2', '3'], ['N', 'Q', 'R', 'W'], ['4', '5', '6', '6X'], ['J', 'Z'], ['A', 'C', 'E'], ['B', 'D', 'F', 'FX', 'M'], ['GS', 'FS', 'H'], ['7', '7X']];
+const trunkRank = new Map(); // trunk key -> rank
+CROSS_ORDER.forEach((ids, i) => ids.forEach((r) => trunkRank.set(trunkOf(r), i)));
+const CROSS_OVERRIDES = [
+  { near: 'Cortlandt St', within: 1.2, over: 'R', under: 'A' },        // Broadway line over 8 Av
+  { near: 'Prince St', within: 1.2, over: 'R', under: 'D' },           // Broadway line over Houston St
+  { near: '42 St-Bryant Pk', within: 0.8, over: 'D', under: '7' },     // 6 Av over the Flushing line
+  { near: '42 St-Bryant Pk', within: 0.8, over: 'D', under: 'GS' },    // ... and over the shuttle
+  { near: 'Queensboro Plaza', within: 1.6, over: 'N', under: 'E' },    // Astoria line over Queens Blvd
+  { near: 'Queensboro Plaza', within: 1.6, over: 'N', under: 'F' },
+];
+let crossings = [];            // {x, z, over: trunk key, rank}
+const crossGrid = new Map();   // 1 km cells -> crossings
+const CROSS_CELL = 1;
+const LIFT_MAX = 9;            // km: "no crossing nearby"
+/** Find where trunks cross (centrelines of different trunks meeting at a real angle). */
+function buildCrossings() {
+  const segs = new Map(), seen = new Set(), CELL = 0.3;
+  for (const set of Object.values(routeOffsetLines)) for (const [route, list] of set) {
+    const trunk = trunkOf(route);
+    for (const { flat } of list) for (let i = 0; i + 3 < flat.length; i += 2) {
+      const x1 = flat[i], z1 = flat[i + 1], x2 = flat[i + 2], z2 = flat[i + 3];
+      const key = `${trunk}|${x1.toFixed(3)},${z1.toFixed(3)},${x2.toFixed(3)},${z2.toFixed(3)}`, rkey = `${trunk}|${x2.toFixed(3)},${z2.toFixed(3)},${x1.toFixed(3)},${z1.toFixed(3)}`;
+      if (seen.has(key) || seen.has(rkey)) continue;
+      seen.add(key);
+      const seg = { trunk, x1, z1, x2, z2 };
+      for (let cx = Math.floor(Math.min(x1, x2) / CELL); cx <= Math.floor(Math.max(x1, x2) / CELL); cx++) {
+        for (let cz = Math.floor(Math.min(z1, z2) / CELL); cz <= Math.floor(Math.max(z1, z2) / CELL); cz++) {
+          const k = cx + ',' + cz;
+          if (!segs.has(k)) segs.set(k, []);
+          segs.get(k).push(seg);
+        }
+      }
+    }
+  }
+  const found = [];
+  for (const list of segs.values()) for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+    const a = list[i], b = list[j];
+    if (a.trunk === b.trunk) continue;
+    const ax = a.x2 - a.x1, az = a.z2 - a.z1, bx = b.x2 - b.x1, bz = b.z2 - b.z1;
+    const den = ax * bz - az * bx, la = Math.hypot(ax, az), lb = Math.hypot(bx, bz);
+    if (!la || !lb || Math.abs(den) / (la * lb) < 0.3) continue; // parallel or a shallow weave on shared track
+    const t = ((b.x1 - a.x1) * bz - (b.z1 - a.z1) * bx) / den, u = ((b.x1 - a.x1) * az - (b.z1 - a.z1) * ax) / den;
+    if (t < 0 || t > 1 || u < 0 || u > 1) continue;
+    const x = a.x1 + t * ax, z = a.z1 + t * az;
+    if (found.some((c) => ((c.a === a.trunk && c.b === b.trunk) || (c.a === b.trunk && c.b === a.trunk)) && Math.hypot(c.x - x, c.z - z) < 0.25)) continue;
+    found.push({ x, z, a: a.trunk, b: b.trunk });
+  }
+  const byName = (name) => [...net.stations.values()].filter((st) => st.name === name);
+  crossings = found.map((c) => {
+    let over = (trunkRank.get(c.a) ?? 0) >= (trunkRank.get(c.b) ?? 0) ? c.a : c.b;
+    for (const o of CROSS_OVERRIDES) {
+      const ko = trunkOf(o.over), ku = trunkOf(o.under);
+      if (!((c.a === ko && c.b === ku) || (c.a === ku && c.b === ko))) continue;
+      if (byName(o.near).some((st) => Math.hypot(st.x - c.x, st.z - c.z) < o.within)) over = ko;
+    }
+    return { x: c.x, z: c.z, over, rank: trunkRank.get(over) ?? 0 };
+  });
+  crossGrid.clear();
+  for (const c of crossings) {
+    const k = Math.floor(c.x / CROSS_CELL) + ',' + Math.floor(c.z / CROSS_CELL);
+    if (!crossGrid.has(k)) crossGrid.set(k, []);
+    crossGrid.get(k).push(c);
+  }
+}
+/** Distance (km) from a point to the nearest crossing where `trunk` passes over (LIFT_MAX: none). */
+function liftDistance(x, z, trunk) {
+  let best = LIFT_MAX;
+  const cx = Math.floor(x / CROSS_CELL), cz = Math.floor(z / CROSS_CELL);
+  for (let i = cx - 2; i <= cx + 2; i++) for (let j = cz - 2; j <= cz + 2; j++) {
+    for (const c of crossGrid.get(i + ',' + j) || []) {
+      if (trunk !== null && c.over !== trunk) continue;
+      const d = Math.hypot(c.x - x, c.z - z);
+      if (d < best) best = d;
+    }
+  }
+  return best;
+}
+// the hump: a smooth rise over about five line widths; higher-ranked trunks rise a little more,
+// so two raised lines that meet still stack in the default order (same formula as the shader)
+const liftHeight = (d, rank) => {
+  const r = tubeRadius.value, t = Math.min(1, Math.max(0, 1 - d / Math.max(0.25, 5 * r)));
+  return t * t * (3 - 2 * t) * r * (2.2 + 0.25 * rank);
+};
+/** Height a trunk's line (and its trains) is raised at a point. */
+const trunkLift = (x, z, route) => { const k = trunkOf(route); return liftHeight(liftDistance(x, z, k), trunkRank.get(k) ?? 0); };
+/** Height of the top line at a point, whichever trunk it is (station symbols sit on top). */
+function topLift(x, z) {
+  let best = 0;
+  const cx = Math.floor(x / CROSS_CELL), cz = Math.floor(z / CROSS_CELL);
+  for (let i = cx - 2; i <= cx + 2; i++) for (let j = cz - 2; j <= cz + 2; j++) {
+    for (const c of crossGrid.get(i + ',' + j) || []) best = Math.max(best, liftHeight(Math.hypot(c.x - x, c.z - z), c.rank));
+  }
+  return best;
+}
 const nyTime = (ts) => new Date(ts * 1000).toLocaleTimeString('en-US', { timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit' });
 const nyDate = (ts) => new Date(ts * 1000).toLocaleString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -183,25 +283,38 @@ const tubeRadius = { value: TUBE_R };
 function zoomableTube(mat, k = 1) {
   mat.onBeforeCompile = (sh) => {
     sh.uniforms.uRadius = tubeRadius;
-    sh.vertexShader = 'uniform float uRadius;\nattribute vec3 aSide;\n' + sh.vertexShader.replace('#include <begin_vertex>',
-      `vec3 transformed = position + normal * (uRadius * ${k.toFixed(2)} - ${TUBE_R.toFixed(4)}) + aSide * (${SLOT_W.toFixed(2)} * uRadius);`);
+    sh.vertexShader = 'uniform float uRadius;\nattribute vec3 aSide;\nattribute vec2 aLift;\n' + sh.vertexShader.replace('#include <begin_vertex>',
+      `vec3 transformed = position + normal * (uRadius * ${k.toFixed(2)} - ${TUBE_R.toFixed(4)}) + aSide * (${SLOT_W.toFixed(2)} * uRadius);
+      float liftT = clamp(1.0 - aLift.x / max(0.25, 5.0 * uRadius), 0.0, 1.0);
+      transformed.y += liftT * liftT * (3.0 - 2.0 * liftT) * uRadius * (2.2 + 0.25 * aLift.y);`);
   };
   return mat;
 }
 
 /** Tube along a centreline, with a per-vertex sideways unit vector × trunk slot (aSide) so the
  *  shader can set trunks side by side at whatever line width the zoom calls for. */
-function trunkTube(pts, slotSigned, radial = 6) {
+function trunkTube(pts, slotSigned, route, radial = 6) {
   const curve = new PolylineCurve(pts);
   const segs = Math.min(4000, Math.max(16, Math.round(curve.total / 0.05)));
   const geo = new THREE.TubeGeometry(curve, segs, TUBE_R, radial, false);
-  const ring = radial + 1, side = new Float32Array(geo.attributes.position.count * 3);
+  const ring = radial + 1, n = geo.attributes.position.count;
+  const side = new Float32Array(n * 3), lift = new Float32Array(n * 2);
+  const trunk = trunkOf(route), rank = trunkRank.get(trunk) ?? 0, pos = geo.attributes.position, c = new THREE.Vector3();
   for (let i = 0; i <= segs; i++) {
     const t = geo.tangents[i], l = Math.hypot(t.x, t.z) || 1;
     const sx = (-t.z / l) * slotSigned, sz = (t.x / l) * slotSigned;
-    for (let j = 0; j < ring; j++) { side[(i * ring + j) * 3] = sx; side[(i * ring + j) * 3 + 2] = sz; }
+    // ring centre: where this ring sits on the centreline
+    c.set(0, 0, 0);
+    for (let j = 0; j < radial; j++) { c.x += pos.getX(i * ring + j); c.z += pos.getZ(i * ring + j); }
+    const d = liftDistance(c.x / radial, c.z / radial, trunk);
+    for (let j = 0; j < ring; j++) {
+      const k = i * ring + j;
+      side[k * 3] = sx; side[k * 3 + 2] = sz;
+      lift[k * 2] = d; lift[k * 2 + 1] = rank;
+    }
   }
   geo.setAttribute('aSide', new THREE.BufferAttribute(side, 3));
+  geo.setAttribute('aLift', new THREE.BufferAttribute(lift, 2));
   return geo;
 }
 
@@ -255,24 +368,18 @@ function buildLineSet(lines, key) {
     if (!net.routes[route]) continue;
     if (!routeColor.has(route)) routeColor.set(route, new THREE.Color(net.routes[route].color));
     if (!routeMats.has(route)) {
-      const gi = trunkIndex.get(route) ?? 0;
+      const gi = trunkRank.get(trunkOf(route)) ?? 0;
       routeMats.set(route, zoomableTube(new THREE.MeshBasicMaterial({
         color: routeColor.get(route), transparent: true, polygonOffset: true, polygonOffsetFactor: -gi, polygonOffsetUnits: -2 * gi,
       })));
     }
     const mat = routeMats.get(route);
     const group = new THREE.Group();
-    const offs = [];
-    routeOffsetLines[key].set(route, offs);
-    for (const sid of shapeIds) {
-      const shape = net.shapes.get(sid);
-      if (!shape) continue;
-      const flat = shape.pts;
-      offs.push({ flat, sid });
+    for (const { flat, sid } of routeOffsetLines[key].get(route) || []) {
       const pts = [];
       for (let i = 0; i < flat.length; i += 2) pts.push(new THREE.Vector3(flat[i], 0, flat[i + 1]));
       if (pts.length < 2) continue;
-      group.add(new THREE.Mesh(trunkTube(pts, slotOf(route) * shapeSign(sid)), mat));
+      group.add(new THREE.Mesh(trunkTube(pts, slotOf(route) * shapeSign(sid), route), mat));
     }
     group.userData.route = route;
     lineSets[key].set(route, group);
@@ -280,14 +387,37 @@ function buildLineSet(lines, key) {
   }
 }
 function buildLines() {
+  // centrelines first, so the crossings are known before the tubes are built
+  for (const [key, lines] of [['day', net.lines], ['night', net.nightLines || {}]]) {
+    for (const [route, shapeIds] of Object.entries(lines)) {
+      if (!net.routes[route]) continue;
+      routeOffsetLines[key].set(route, shapeIds.map((sid) => ({ flat: net.shapes.get(sid)?.pts, sid })).filter((x) => x.flat));
+    }
+  }
+  buildCrossings();
   buildLineSet(net.lines, 'day');
   buildLineSet(net.nightLines || {}, 'night');
 }
 
 // Station symbols as on the MTA map: one per trunk line at each station. A black dot is a local
-// stop; a white circle with a black outline is where more than one service stops or where you
-// can transfer, and the circles of a transfer complex are joined into one white pill.
-let nodeMesh, nodeInner, linkOuter, linkInner, stationList, nodeList, linkList;
+// stop; a white circle with a black outline is where express trains stop too. The stations of
+// a transfer complex are joined by thin black connector lines.
+/** True where one of `group`'s routes runs express past a stop that another makes next to `id`. */
+function isExpressStop(id, group) {
+  if (group.length < 2) return false;
+  const usable = (r) => { const ps = net.byRoute.get(r) || []; const top = Math.max(1, ...ps.map((p) => p.count)); return ps.filter((p) => p.count >= top * 0.15 && p.pos.has(id)); };
+  for (const r of group) for (const pr of usable(r)) {
+    const next = pr.stops[pr.pos.get(id) + 1];
+    if (!next) continue;
+    for (const q of group) {
+      if (q === r) continue;
+      // q also goes from here to r's next stop, but stops somewhere in between
+      for (const pq of usable(q)) if (pq.pos.has(next) && pq.pos.get(next) > pq.pos.get(id) + 1) return true;
+    }
+  }
+  return false;
+}
+let nodeMesh, nodeInner, linkOuter, stationList, nodeList, linkList;
 const nodeLists = { day: [], night: [] }, linkLists = { day: [], night: [] };
 const adaMeshes = {};
 function buildNodes(mode) {
@@ -311,17 +441,16 @@ function buildNodes(mode) {
         }
       }
       const slot = sid ? slotOf(route) * shapeSign(sid) : 0;
-      list.push({ st, route, routes: group, bx, bz, sx, sz, slot, x: bx, z: bz, express: group.length > 1 || group.some((r) => /X$/.test(r)) });
+      list.push({ st, route, routes: group, bx, bz, sx, sz, slot, x: bx, z: bz, express: isExpressStop(st.id, group) });
     }
   }
-  // transfers: every symbol of a complex with more than one symbol is white, joined to its
-  // nearest neighbours (a minimum spanning tree, skipping members far apart)
+  // transfers: the symbols of a complex are joined to their nearest neighbours (a minimum
+  // spanning tree, skipping members far apart)
   const byComplex = new Map();
   list.forEach((n, i) => { if (!byComplex.has(n.st.complex)) byComplex.set(n.st.complex, []); byComplex.get(n.st.complex).push(i); });
   const links = [];
   for (const ids of byComplex.values()) {
     if (ids.length < 2) continue;
-    for (const i of ids) list[i].express = true;
     const inTree = new Set([ids[0]]);
     while (inTree.size < ids.length) {
       let best = null, bd = Infinity;
@@ -352,8 +481,7 @@ function buildStations() {
   const bar = new THREE.BoxGeometry(1, 1, 1).translate(0, 0.5, 0);
   const maxLinks = Math.max(linkLists.day.length, linkLists.night.length, 1);
   linkOuter = new THREE.InstancedMesh(bar, new THREE.MeshBasicMaterial({ color: C.white }), maxLinks);
-  linkInner = new THREE.InstancedMesh(bar, new THREE.MeshBasicMaterial({ color: C.white }), maxLinks);
-  for (const m of [nodeMesh, nodeInner, linkOuter, linkInner]) m.frustumCulled = false;
+  for (const m of [nodeMesh, nodeInner, linkOuter]) m.frustumCulled = false;
   // accessible-stations symbols: ring/disc (fully accessible), diamond (partly), triangle (elevator out)
   const flat = (segs) => new THREE.CylinderGeometry(1, 1, 1, segs).translate(0, 0.5, 0);
   const mk = (geo, color) => {
@@ -371,7 +499,7 @@ function buildStations() {
     partOuter: mk(diamond, C.adaBlue), partInner: mk(diamond, C.white),
     warnOuter: mk(tri, C.ink), warnInner: mk(tri, C.warn),
   });
-  scene.add(nodeMesh, nodeInner, linkOuter, linkInner);
+  scene.add(nodeMesh, nodeInner, linkOuter);
   layoutStations();
 }
 function stationTop(st) {
@@ -386,12 +514,13 @@ function layoutStations() {
   // bold symbols when zoomed in; when the whole city is on screen they shrink toward the line
   // width so neighbouring stations don't merge into beads
   const far = Math.min(1, Math.max(0, (state.wpp - 0.01) / 0.04));
-  const kLocal = 1.2, kExpress = 1.75 - 0.35 * far, kInner = 1.2 - 0.25 * far;
+  const kLocal = 1.3 - 0.15 * far, kExpress = 1.6 - 0.25 * far, kInner = 1.05 - 0.2 * far;
   const off = SLOT_W * r;
   nodeList.forEach((n, i) => {
-    // sit on the trunk's slot at the current line width
+    // sit on the trunk's slot at the current line width, on top of whatever crosses there
     n.x = n.bx + n.sx * n.slot * off; n.z = n.bz + n.sz * n.slot * off;
-    const y = heightOf(n.route) + top;
+    n.y = heightOf(n.route) + topLift(n.bx, n.bz) + top;
+    const y = n.y;
     const dim = state.ada && n.st.ada === 0; // non-accessible: a small grey dot
     const rad = dim ? r * 0.8 : r * (n.express ? kExpress : kLocal);
     m.compose(p.set(n.x, y, n.z), q, s.set(rad, t, rad));
@@ -402,27 +531,25 @@ function layoutStations() {
       nodeInner.setMatrixAt(w++, m);
     }
   });
-  // transfer pills: a black-edged white bar joining the circles of a complex
+  // transfer connectors: a thin black line joining the station symbols of a complex, drawn
+  // just under the symbols
   let nl = 0;
   const up = new THREE.Vector3(0, 1, 0);
   for (const [a, b] of linkList) {
     const A = nodeList[a], B = nodeList[b];
     const dx = B.x - A.x, dz = B.z - A.z, len = Math.hypot(dx, dz);
     if (len < 1e-6) continue;
-    const y = Math.max(heightOf(A.route), heightOf(B.route)) + top;
     q.setFromAxisAngle(up, -Math.atan2(dz, dx));
-    m.compose(p.set((A.x + B.x) / 2, y, (A.z + B.z) / 2), q, s.set(len, t, 2 * r * kExpress));
+    m.compose(p.set((A.x + B.x) / 2, Math.max(A.y, B.y) - t * 0.4, (A.z + B.z) / 2), q, s.set(len, t, r * 0.55));
     linkOuter.setMatrixAt(nl, m);
     linkOuter.setColorAt(nl, state.ada ? _grey : _ink);
-    m.compose(p.set((A.x + B.x) / 2, y + t * 0.5, (A.z + B.z) / 2), q, s.set(len, t, 2 * r * kInner));
-    linkInner.setMatrixAt(nl, m);
     nl++;
   }
   q.identity();
-  linkOuter.count = linkInner.count = nl;
+  linkOuter.count = nl;
   nodeMesh.count = nodeList.length;
   nodeInner.count = w;
-  for (const mesh of [nodeMesh, nodeInner, linkOuter, linkInner]) mesh.instanceMatrix.needsUpdate = true;
+  for (const mesh of [nodeMesh, nodeInner, linkOuter]) mesh.instanceMatrix.needsUpdate = true;
   if (nodeMesh.instanceColor) nodeMesh.instanceColor.needsUpdate = true;
   if (linkOuter.instanceColor) linkOuter.instanceColor.needsUpdate = true;
   layoutAda();
@@ -540,7 +667,8 @@ function consistCars(v, trip, len, lenK, n) {
       const c = v.s - (i + 0.5) * L;
       const [xf, zf] = pointAt(v.shape, c + L * 0.35), [xb, zb] = pointAt(v.shape, c - L * 0.35);
       const h = Math.atan2(zf - zb, xf - xb);
-      cars.push({ x: (xf + xb) / 2 - Math.sin(h) * off, z: (zf + zb) / 2 + Math.cos(h) * off, y: v.y, h });
+      const mx = (xf + xb) / 2, mz = (zf + zb) / 2;
+      cars.push({ x: mx - Math.sin(h) * off, z: mz + Math.cos(h) * off, y: v.y + trunkLift(mx, mz, trip.route), h });
     }
   } else {
     for (let i = 0; i < n; i++) {
@@ -715,8 +843,8 @@ function updateTrains(dt) {
     const arrow = { len: Math.max(len * lenK * 0.6, state.wpp * 5), width: Math.max(carW * 0.85, state.wpp * 4), color: trip.delayed ? _red : _ink };
     // with the whole city on screen the arrows would only clutter the map
     trainRenderer.add(cars, len, lenK, g, _c, trip.route, _sc, 1, far < 0.6 || sel ? arrow : null, routeColor.get(trip.route) || _grey);
-    const last = cars[cars.length - 1] || v;
-    drawnTrains.push({ id: trip.id, head: [v.x, v.y, v.z], tail: [last.x, v.y, last.z] });
+    const last = cars[cars.length - 1] || v, first = cars[0] || v;
+    drawnTrains.push({ id: trip.id, head: [v.x, first.y, v.z], tail: [last.x, last.y, last.z] });
   }
   trainRenderer.end();
   for (const id of trainView.keys()) if (!state.trips.has(id)) trainView.delete(id);
@@ -739,7 +867,7 @@ function updatePath() {
   for (let i = 0; i < flat.length; i += 2) pts.push(new THREE.Vector3(flat[i], heightOf(trip.route), flat[i + 1]));
   if (pts.length < 2) return;
   pathMesh = new THREE.Mesh(
-    trunkTube(pts, slotOf(trip.route) * shapeSign(p.shape), 8),
+    trunkTube(pts, slotOf(trip.route) * shapeSign(p.shape), trip.route, 8),
     zoomableTube(new THREE.MeshBasicMaterial({ color: C.ink, transparent: true, opacity: 0.3 }), 1.9),
   );
   scene.add(pathMesh);
@@ -1180,7 +1308,7 @@ function pick(cx, cy, touch = false) {
   };
   for (const n of nodeList) {
     if (state.focusRoute && !routesOf(n.st).includes(state.focusRoute)) continue;
-    test(n.x, heightOf(n.route), n.z, { kind: 'station', id: n.st.id });
+    test(n.x, n.y ?? heightOf(n.route), n.z, { kind: 'station', id: n.st.id });
   }
   return best;
 }
@@ -1343,7 +1471,7 @@ function updateZoom() {
   state.zoomK = k;
   state.wpp = wpp;
   // far out, parallel services touch like the map's bands, and lines never get thinner than ~3 px
-  tubeRadius.value = Math.max(Math.min(0.05, Math.max(0.007, 0.016 * k)), wpp * (innerWidth <= 760 ? 2.2 : 3.0));
+  tubeRadius.value = Math.max(Math.min(0.065, Math.max(0.008, 0.022 * k)), wpp * (innerWidth <= 760 ? 2.2 : 3.0));
   scene.fog.near = Math.max(45, dist * 1.3);
   scene.fog.far = scene.fog.near + 75;
   layoutStations();
@@ -1404,7 +1532,7 @@ async function start() {
   atHome = true;
   if (import.meta.env.DEV) {
     window.__subway = {
-      state, trainView, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, get glows() { return glowPool; }, camera, controls, net, select, setNight, setAda, goHome,
+      state, trainView, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, get glows() { return glowPool; }, get crossings() { return crossings; }, camera, controls, net, select, setNight, setAda, goHome,
       step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); updateGlows(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
     };
   }
