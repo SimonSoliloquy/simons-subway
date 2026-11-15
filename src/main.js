@@ -429,7 +429,7 @@ function updateLabels() {
 // ---------- trains ----------
 let trainRenderer;
 const trainView = new Map();   // trip id -> {x,z,h,y,s,speed,shape,pos}
-let drawnTrains = [];          // trip ids drawn this frame (for picking)
+let drawnTrains = [];          // {id, head, tail} of each train drawn this frame (for picking)
 const revealIndex = new Map(); // route -> position in the legend, for the line-by-line reveal
 function buildTrains() { trainRenderer = new TrainRenderer(scene); }
 const revealed = (route) => state.revealClock >= REVEAL_STEP * (revealIndex.get(route) ?? revealIndex.size);
@@ -520,8 +520,10 @@ function updateTrains(dt) {
     if (sel) _c.set(C.ink);
     _sc.copy(routeColor.get(trip.route) || _w);
     if (trip.delayed) _sc.set(0xdc4d4a);
-    trainRenderer.add(consistCars(v, trip, len, lenK), len, lenK, girth * (sel ? 1.3 : 1), _c, _sc);
-    drawnTrains.push(trip.id);
+    const cars = consistCars(v, trip, len, lenK);
+    trainRenderer.add(cars, len, lenK, girth * (sel ? 1.3 : 1), _c, _sc);
+    const last = cars[cars.length - 1] || v;
+    drawnTrains.push({ id: trip.id, head: [v.x, v.y, v.z], tail: [last.x, v.y, last.z] });
   }
   trainRenderer.end();
   for (const id of trainView.keys()) if (!state.trips.has(id)) trainView.delete(id);
@@ -767,8 +769,7 @@ function renderDetails() {
   } else {
     const t = state.trips.get(sel.id);
     if (!t) { el.innerHTML = '<div class="head"><p class="muted">This trip has left the feed.</p><button class="close" aria-label="Close">×</button></div>'; return; }
-    const v = trainView.get(t.id)?.pos;
-    const where = !v ? '' : v.state === 'moving' ? `Between ${esc(net.stations.get(v.from)?.name)} and ${esc(net.stations.get(v.to)?.name)}` : v.state === 'stopped' ? `At ${esc(net.stations.get(v.to)?.name)}` : v.state === 'origin' ? `Waiting at ${esc(net.stations.get(v.to)?.name)}` : 'Position unknown (off-pattern)';
+    const where = trainWhere(t);
     const stale = t.vehicle?.ts && state.feedTime - t.vehicle.ts > 90;
     el.innerHTML = `
       <div class="head">${bullet(t.route)}<div><h3>to ${esc(destName(t))}</h3><div class="sub">${t.dir === 'N' ? 'Northbound' : 'Southbound'} · ${esc(t.trainId || t.id)}</div></div><button class="close" aria-label="Close">×</button></div>
@@ -779,10 +780,31 @@ function renderDetails() {
   }
 }
 
-// countdown board floating above the selected station in the 3D view
+/** Where a train is, in words: between two stations, stopped at one, or waiting to depart. */
+function trainWhere(t) {
+  const v = trainView.get(t.id)?.pos;
+  const name = (id) => `<b>${esc(net.stations.get(id)?.name || id)}</b>`;
+  if (!v) return '';
+  if (v.state === 'moving') return v.from ? `Between ${name(v.from)} and ${name(v.to)}` : `Approaching ${name(v.to)}`;
+  if (v.state === 'stopped') return `Stopped at ${name(v.to)}`;
+  if (v.state === 'origin') return `Waiting to depart ${name(v.to)}`;
+  return `Next stop ${name(v.to)} (position estimated)`;
+}
+
+// countdown board floating above the selected station (or train) in the 3D view
 const board = $('#board');
 function renderBoard() {
   const sel = state.selected;
+  if (sel?.kind === 'train') {
+    const t = state.trips.get(sel.id);
+    if (!t) { board.hidden = true; return; }
+    const now = Date.now() / 1000, next = t.stus[0];
+    board.innerHTML = `<div class="bhead brow">${bullet(t.route, 'sm')}<span class="bdest">to ${esc(destName(t))}</span></div>
+      <div class="bwhere">${trainWhere(t)}</div>
+      ${next ? `<div class="brow"><span class="bdest muted">Next: ${esc(net.stations.get(next.parent)?.name || next.stop)}</span><span class="bmin">${mins(next.arr, now)}</span></div>` : ''}`;
+    board.hidden = false;
+    return;
+  }
   if (sel?.kind !== 'station') { board.hidden = true; return; }
   const st = complexOf(sel.id);
   const now = Date.now() / 1000;
@@ -792,9 +814,16 @@ function renderBoard() {
   board.hidden = false;
 }
 function positionBoard() {
-  if (board.hidden || state.selected?.kind !== 'station') return;
-  const st = complexOf(state.selected.id);
-  _v.set(st.x, complexTop(st) + tubeRadius.value * 2, st.z).project(camera);
+  const sel = state.selected;
+  if (board.hidden || !sel) return;
+  if (sel.kind === 'train') {
+    const v = trainView.get(sel.id);
+    if (!v) return;
+    _v.set(v.x, v.y + tubeRadius.value * 2, v.z).project(camera);
+  } else {
+    const st = complexOf(sel.id);
+    _v.set(st.x, complexTop(st) + tubeRadius.value * 2, st.z).project(camera);
+  }
   if (_v.z > 1 || Math.abs(_v.x) > 1.2 || Math.abs(_v.y) > 1.2) { board.style.visibility = 'hidden'; return; }
   board.style.visibility = '';
   board.style.transform = `translate(${((_v.x + 1) / 2) * innerWidth}px, ${((1 - _v.y) / 2) * innerHeight}px) translate(-50%, calc(-100% - 14px))`;
@@ -932,19 +961,30 @@ resultsEl.addEventListener('click', (e) => {
 
 // ---------- picking (screen space, forgiving at any zoom) ----------
 const tooltip = $('#tooltip');
-function pick(cx, cy) {
-  let best = null, bd = 14 * 14;
-  const test = (x, y, z, item, bias = 0) => {
-    _v.set(x, y, z).project(camera);
-    if (_v.z > 1) return;
-    const dx = ((_v.x + 1) / 2) * innerWidth - cx, dy = ((1 - _v.y) / 2) * innerHeight - cy;
-    const d = dx * dx + dy * dy - bias;
+const toScreen = (x, y, z) => {
+  _v.set(x, y, z).project(camera);
+  return _v.z > 1 ? null : [((_v.x + 1) / 2) * innerWidth, ((1 - _v.y) / 2) * innerHeight];
+};
+function pick(cx, cy, touch = false) {
+  // A train is hit anywhere along its body, from the lead car to the last, and wins over the
+  // station symbols under it (a train standing at a platform covers them).
+  let train = null, td = (touch ? 16 : 10) ** 2;
+  for (const d of drawnTrains) {
+    const a = toScreen(...d.head), b = toScreen(...d.tail);
+    if (!a || !b) continue;
+    const ex = b[0] - a[0], ey = b[1] - a[1], l = ex * ex + ey * ey || 1;
+    const t = Math.max(0, Math.min(1, ((cx - a[0]) * ex + (cy - a[1]) * ey) / l));
+    const dx = a[0] + t * ex - cx, dy = a[1] + t * ey - cy, dd = dx * dx + dy * dy;
+    if (dd < td) { td = dd; train = { kind: 'train', id: d.id }; }
+  }
+  if (train) return train;
+  let best = null, bd = (touch ? 20 : 14) ** 2;
+  const test = (x, y, z, item) => {
+    const p = toScreen(x, y, z);
+    if (!p) return;
+    const d = (p[0] - cx) ** 2 + (p[1] - cy) ** 2;
     if (d < bd) { bd = d; best = item; }
   };
-  for (const id of drawnTrains) {
-    const v = trainView.get(id);
-    if (v) test(v.x, v.y, v.z, { kind: 'train', id }, 40);
-  }
   for (const n of nodeList) {
     if (state.focusRoute && !routesOf(n.st).includes(state.focusRoute)) continue;
     test(n.x, heightOf(n.route), n.z, { kind: 'station', id: n.st.id });
@@ -968,7 +1008,7 @@ controls.addEventListener('start', () => { atHome = false; if (state.follow) { s
 canvas.addEventListener('pointerup', (e) => {
   if (e.button !== 0 || multiTouch) return; // right-click turns the view; only a plain click or tap selects
   if (!downAt || Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y) > 5) return;
-  const hit = pick(e.clientX, e.clientY);
+  const hit = pick(e.clientX, e.clientY, e.pointerType === 'touch');
   select(hit, { fly: !!hit });
 });
 function updateHover() {
@@ -987,7 +1027,7 @@ function updateHover() {
   } else {
     const t = state.trips.get(hit.id);
     if (!t) return;
-    html = `<div class="row" style="margin:0;align-items:center">${bullet(t.route, 'sm')} <b>to ${esc(destName(t))}</b></div><div class="muted">next: ${esc(net.stations.get(t.stus[0].parent)?.name || '')} · ${mins(t.stus[0].arr, Date.now() / 1000)}</div>`;
+    html = `<div class="row" style="margin:0;align-items:center">${bullet(t.route, 'sm')} <b>to ${esc(destName(t))}</b></div><div class="muted">${trainWhere(t)}</div><div class="muted">next: ${esc(net.stations.get(t.stus[0].parent)?.name || '')} · ${mins(t.stus[0].arr, Date.now() / 1000)}</div><div class="muted" style="margin-top:3px">Click for its stops</div>`;
   }
   // only touch the DOM when the content changes; position follows the pointer
   if (tooltip._html !== html) { tooltip._html = html; tooltip.innerHTML = html; }
@@ -1170,7 +1210,7 @@ async function start() {
   atHome = true;
   if (import.meta.env.DEV) {
     window.__subway = {
-      state, trainView, get trains() { return trainRenderer; }, camera, controls, net, select, setNight, setAda, goHome,
+      state, trainView, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, camera, controls, net, select, setNight, setAda, goHome,
       step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
     };
   }

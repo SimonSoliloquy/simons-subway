@@ -164,6 +164,9 @@ tr.click, .brow.click { cursor: pointer; }
 #board .brow.muted { color: #6e6f72; }
 #board .bullet { cursor: inherit; }
 #board .brow:last-child { padding-bottom: 8px; }
+#board .bhead.brow { padding: 8px 10px 6px; }
+#board .bwhere { padding: 6px 10px 2px; color: #d6d6d6; }
+#board .bwhere b { color: #fff; font-weight: 700; }
 #tooltip .trow { display: flex; align-items: center; gap: 4px; margin-top: 4px; font-variant-numeric: tabular-nums; }
 #tooltip .trow > span:not(.bullet) { margin-right: 6px; }
 #tooltip .isa { width: 14px; height: 14px; }
