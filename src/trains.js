@@ -101,12 +101,13 @@ export class TrainRenderer {
     this._up = new THREE.Vector3(0, 1, 0);
   }
   begin() { this.nc = 0; this.ns = 0; }
-  /** cars: [{x,y,z,h}] lead car first; len: real car length (km); girth: cross-section multiplier. */
-  add(cars, len, lenK, girth, color, signColor) {
+  /** cars: [{x,y,z,h}] lead car first; len: real car length (km); girth: cross-section multiplier;
+   *  tall: extra height on top of girth, so trains stand up from the line in a tilted view. */
+  add(cars, len, lenK, girth, color, signColor, tall = 1) {
     for (let i = 0; i < cars.length && this.nc < MAX_CARS; i++) {
       const c = cars[i];
       this._q.setFromAxisAngle(this._up, -c.h);
-      this._m.compose(this._p.set(c.x, c.y, c.z), this._q, this._s.set(len * lenK, len * girth, len * girth));
+      this._m.compose(this._p.set(c.x, c.y, c.z), this._q, this._s.set(len * lenK, len * girth * tall, len * girth));
       this.body.setMatrixAt(this.nc, this._m);
       this.roof.setMatrixAt(this.nc, this._m);
       this.roof.setColorAt(this.nc, color);

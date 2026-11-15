@@ -460,13 +460,97 @@ function consistCars(v, trip, len, lenK) {
   return cars;
 }
 
+// ---------- creeping and arrival glows ----------
+const CREEP = 0.0025; // map km/s, a slow roll (~5-9 km/h)
+/** How far along its shape a train may creep: partway to the station after its next one. */
+function creepLimit(trip, pos, waiting) {
+  const p = trip.pattern, cum = pos.shape.cum;
+  if (waiting) return pos.sNext + 0.02;
+  const j = p?.pos.get(pos.to);
+  const sAfter = j !== undefined && j + 1 < p.idx.length ? cum[p.idx[j + 1]] : null;
+  if (sAfter === null || sAfter <= pos.sNext) return Math.min(pos.sNext + 0.03, cum[cum.length - 1]);
+  return pos.sNext + Math.min(0.25 * (sAfter - pos.sNext), 0.2);
+}
+
+// A pulse at a station when a train arrives: a soft glow and a ripple ring in the route colour
+// that swell and fade, with a quick sparkle at the centre. Sprites keep a constant screen size.
+function glowTexture(kind) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  if (kind === 'ring') {
+    const r = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    r.addColorStop(0, 'rgba(255,255,255,0)'); r.addColorStop(0.62, 'rgba(255,255,255,0)'); r.addColorStop(0.8, 'rgba(255,255,255,1)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.fillRect(0, 0, 64, 64);
+  } else if (kind === 'spark') {
+    const r = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    r.addColorStop(0, 'rgba(255,255,255,1)'); r.addColorStop(0.25, 'rgba(255,255,255,.7)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.fillRect(0, 0, 64, 64);
+    g.strokeStyle = 'rgba(255,255,255,.9)'; g.lineWidth = 2;
+    g.beginPath(); g.moveTo(32, 2); g.lineTo(32, 62); g.moveTo(2, 32); g.lineTo(62, 32); g.stroke();
+  } else {
+    const r = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    r.addColorStop(0, 'rgba(255,255,255,.9)'); r.addColorStop(0.45, 'rgba(255,255,255,.45)'); r.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = r; g.fillRect(0, 0, 64, 64);
+  }
+  return new THREE.CanvasTexture(c);
+}
+const GLOW_LIFE = 1.6; // s
+const glowPool = [];
+let glowTex, sparkTex, ringTex;
+function arrivalGlow(trip, shape, s) {
+  if (state.revealClock < 2) return; // not while the trains are first appearing
+  if (!glowTex) { glowTex = glowTexture('glow'); sparkTex = glowTexture('spark'); ringTex = glowTexture('ring'); }
+  let g = glowPool.find((x) => x.t >= GLOW_LIFE);
+  if (!g) {
+    if (glowPool.length >= 96) return;
+    const mk = (map) => {
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map, transparent: true, depthWrite: false, depthTest: false, fog: false }));
+      sp.renderOrder = 5;
+      scene.add(sp);
+      return sp;
+    };
+    g = { disc: mk(glowTex), ring: mk(ringTex), spark: mk(sparkTex), t: GLOW_LIFE };
+    glowPool.push(g);
+  }
+  const [x, z, h] = pointAt(shape, s);
+  const off = laneOf(trip.route).off * shapeSign(trip.pattern.shape);
+  const y = heightOf(trip.route) + tubeRadius.value * 2;
+  g.disc.position.set(x - Math.sin(h) * off, y, z + Math.cos(h) * off);
+  g.spark.position.copy(g.disc.position);
+  g.ring.position.copy(g.disc.position);
+  const col = routeColor.get(trip.route) || _w;
+  g.disc.material.color.copy(col);
+  g.ring.material.color.copy(col);
+  g.spark.material.color.copy(col).lerp(_w, 0.55);
+  g.t = 0;
+}
+function updateGlows(dt) {
+  const px = state.wpp || 0.01;
+  for (const g of glowPool) {
+    if (g.t >= GLOW_LIFE) { g.disc.visible = g.ring.visible = g.spark.visible = false; continue; }
+    g.t += dt;
+    const k = Math.min(1, g.t / GLOW_LIFE), ease = 1 - (1 - k) ** 3;
+    g.disc.visible = g.ring.visible = g.spark.visible = true;
+    g.disc.scale.setScalar(px * (30 + 30 * ease));
+    g.disc.material.opacity = 0.6 * (1 - k) ** 1.5;
+    g.ring.scale.setScalar(px * (14 + 62 * ease));
+    g.ring.material.opacity = 0.85 * (1 - k) ** 1.4;
+    const ks = Math.min(1, g.t / 0.8);
+    g.spark.scale.setScalar(px * 26 * (1 - ks * 0.5));
+    g.spark.material.opacity = (1 - ks) ** 2;
+    g.spark.material.rotation = g.t * 1.5;
+  }
+}
+
 function updateTrains(dt) {
   const now = Date.now() / 1000;
   const k = Math.min(1, dt * 2.5);
   if (state.revealClock >= 0) state.revealClock += dt;
   // Cars are drawn as symbols: R62 proportions, scaled with zoom so they stay legible
   // (about 1.5x real length up close, 6x at city scale), cross-section fattened further.
-  const lenK = Math.min(5, Math.max(1, state.zoomK));          // never shorter than real
+  const far = Math.min(1, Math.max(0, (state.wpp - 0.01) / 0.04)); // 1 when the whole city is on screen
+  const lenK = Math.min(6 - 2 * far, Math.max(1.3, state.zoomK));   // never shorter than real
   drawnTrains = [];
   trainRenderer.begin();
   for (const trip of state.trips.values()) {
@@ -479,12 +563,12 @@ function updateTrains(dt) {
     const visible = state.showTrains && (sel || ((state.showWaiting || !waiting) && routeRuns(trip.route) && revealed(trip.route)
       && (!state.focusRoute || trip.route === state.focusRoute)));
     let v = trainView.get(trip.id);
-    const y = heightOf(trip.route) + tubeRadius.value * 0.85; // riding on top of the line
+    const y = heightOf(trip.route) + tubeRadius.value * 0.6; // riding on the line
     if (!v) { v = { x: pos.x, z: pos.z, h: pos.h, y, speed: 0 }; trainView.set(trip.id, v); }
     if (pos.shape) {
       // Drive along the real track: speed is chosen so the train reaches its next station at
-      // the predicted arrival time (faster when behind the estimate, slower when ahead), and
-      // the train holds still when the feed says it has stopped moving.
+      // the predicted arrival time (faster when behind the estimate, slower when ahead).
+      // Trains never stand still: early, dwelling or stalled trains creep on very slowly.
       // New feed data often moves the estimate; a train that is behind speeds up to catch it
       // and one that is ahead waits, so trains never jump. Only a large error snaps.
       const fresh = v.shape !== pos.shape || v.s === undefined;
@@ -497,8 +581,16 @@ function updateTrains(dt) {
         const timeLeft = pos.state === 'moving' ? Math.max(4, pos.arr - now) : 3;
         let want = left <= 0 || stalled ? 0 : Math.min(VMAX, left / timeLeft);
         if (behind > 0.05 && left > 0) want = Math.min(left / 2, Math.max(want, behind / 6)); // close the gap in ~6 s
+        // creep: a little way past the next station at most (part of the way to the one after),
+        // ever slower as it nears that limit, so it never visibly stops and never runs far ahead
+        const limit = creepLimit(trip, pos, waiting);
+        want = Math.max(want, Math.min(CREEP, Math.max(0, limit - v.s) * 0.004));
         v.speed += (want - v.speed) * Math.min(1, dt * 1.5); // ease acceleration
-        if (v.s < pos.sNext) v.s = Math.min(pos.sNext, v.s + v.speed * dt * state.timeScale);
+        const before = v.s;
+        v.s = Math.min(Math.max(v.s, limit), v.s + v.speed * dt * state.timeScale);
+        // arrival: the train just reached its next station
+        const at = pos.sNext - 0.004;
+        if (before < at && v.s >= at && visible && v.arrived !== pos.to) { v.arrived = pos.to; arrivalGlow(trip, pos.shape, pos.sNext); }
       }
       const [x, z, h] = pointAt(pos.shape, v.s);
       const off = laneOf(trip.route).off * shapeSign(trip.pattern.shape);
@@ -514,14 +606,15 @@ function updateTrains(dt) {
     v.pos = pos;
     if (!visible) continue;
     const { len } = consistOf(trip.route);
-    // slimmer than the line, so a train reads as a silver car riding inside its route colour
-    const girth = Math.max(lenK * 2, (tubeRadius.value * 1.25) / (0.169 * len));
-    _c.set(waiting ? 0xe4e6e8 : 0x9aa1a8);
+    // a little wider than its line, so the silver cars stand out with the route colour beside
+    // them, and taller, so they stand up off the line in a tilted view
+    const girth = Math.max(lenK * 2.4, (tubeRadius.value * (2.4 - 0.6 * far)) / (0.169 * len));
+    _c.set(waiting ? 0xeef0f2 : 0xb4bac0);
     if (sel) _c.set(C.ink);
     _sc.copy(routeColor.get(trip.route) || _w);
     if (trip.delayed) _sc.set(0xdc4d4a);
     const cars = consistCars(v, trip, len, lenK);
-    trainRenderer.add(cars, len, lenK, girth * (sel ? 1.3 : 1), _c, _sc);
+    trainRenderer.add(cars, len, lenK, girth * (sel ? 1.3 : 1), _c, _sc, 1.5);
     const last = cars[cars.length - 1] || v;
     drawnTrains.push({ id: trip.id, head: [v.x, v.y, v.z], tail: [last.x, v.y, last.z] });
   }
@@ -1163,6 +1256,7 @@ function frame() {
   updateFlight();
   updateZoom();
   updateTrains(dt);
+  updateGlows(dt);
   if (state.follow && !flight && state.selected?.kind === 'train') {
     const v = trainView.get(state.selected.id);
     if (v) {
@@ -1210,8 +1304,8 @@ async function start() {
   atHome = true;
   if (import.meta.env.DEV) {
     window.__subway = {
-      state, trainView, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, camera, controls, net, select, setNight, setAda, goHome,
-      step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
+      state, trainView, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, get glows() { return glowPool; }, camera, controls, net, select, setNight, setAda, goHome,
+      step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); updateGlows(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
     };
   }
   frame();
