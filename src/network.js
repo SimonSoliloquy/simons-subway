@@ -1,6 +1,41 @@
 // Static network model built from public/data/subway.json, plus the logic that places
 // a live GTFS-realtime trip on the track geometry.
 
+// ---------- schematic distortion ----------
+// The MTA map is not to scale: dense Manhattan and Downtown Brooklyn are drawn larger and the
+// outer boroughs smaller, so stations in the core have room. Every coordinate (track, stations,
+// land, labels) goes through the same radial magnification, strongest around Lower Manhattan
+// and fading to true scale about 14 km out: m(r) = 1 + A·exp(-(r/S)²).
+const CORE = { x: 1.0, z: -1.5 }; // km from the origin (City Hall), about Canal St
+const MAG_A = 1.4, MAG_S = 7;    // 2.4x at the core, 1.5x 7 km out, ~1x beyond 14 km
+const SQRT_PI_2 = Math.sqrt(Math.PI) / 2;
+function erf(x) { // Abramowitz-Stegun 7.1.26, |error| < 1.5e-7
+  const t = 1 / (1 + 0.3275911 * Math.abs(x));
+  const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+  return x >= 0 ? y : -y;
+}
+/** Map a true (km) position to its schematic position. */
+export function distort(x, z) {
+  const dx = x - CORE.x, dz = z - CORE.z, r = Math.hypot(dx, dz);
+  if (r < 1e-9) return [x, z];
+  const k = (r + MAG_A * MAG_S * SQRT_PI_2 * erf(r / MAG_S)) / r; // ∫ m(r) dr / r
+  return [CORE.x + dx * k, CORE.z + dz * k];
+}
+/** Local magnification along the track at a schematic position (for honest speeds). */
+export function mapScale(x, z) {
+  // invert roughly: the schematic radius is at least the true radius, so search outward
+  const dx = x - CORE.x, dz = z - CORE.z, R = Math.hypot(dx, dz);
+  let lo = 0, hi = R;
+  for (let i = 0; i < 30; i++) { const m = (lo + hi) / 2; const [px, pz] = distort(CORE.x + m, CORE.z); if (px - CORE.x < R) lo = m; else hi = m; }
+  return 1 + MAG_A * Math.exp(-((lo / MAG_S) ** 2));
+}
+export const MAX_MAG = 1 + MAG_A;
+const distortFlat = (flat) => {
+  const out = new Float32Array(flat.length);
+  for (let i = 0; i < flat.length; i += 2) { const [x, z] = distort(flat[i], flat[i + 1]); out[i] = x; out[i + 1] = z; }
+  return out;
+};
+
 export async function loadNetwork() {
   const [net, ground] = await Promise.all([
     fetch(import.meta.env.BASE_URL + 'data/subway.json').then((r) => r.json()),
@@ -10,7 +45,7 @@ export async function loadNetwork() {
   const stations = new Map();
   for (const [id, [name, x, z, routes, complex, nightRoutes, ada, adaNorth, adaSouth, adaNotes]] of Object.entries(net.stations)) {
     // stations with no routes (e.g. Staten Island Railway, not part of this map) are dropped
-    if (routes.length) stations.set(id, { id, name, x, z, routes, complex, nightRoutes: nightRoutes || [], ada: ada || 0, adaNorth: adaNorth || 0, adaSouth: adaSouth || 0, adaNotes: adaNotes || '' });
+    if (routes.length) stations.set(id, { id, name, ...((([x2, z2]) => ({ x: x2, z: z2 }))(distort(x, z))), routes, complex, nightRoutes: nightRoutes || [], ada: ada || 0, adaNorth: adaNorth || 0, adaSouth: adaSouth || 0, adaNotes: adaNotes || '' });
   }
   // station complexes: one "station" on the map, possibly several GTFS parent stations
   const complexes = new Map();
@@ -39,7 +74,8 @@ export async function loadNetwork() {
 
   // cumulative arc length per shape, for interpolation
   const shapes = new Map();
-  for (const [id, flat] of Object.entries(net.shapes)) {
+  for (const [id, raw] of Object.entries(net.shapes)) {
+    const flat = distortFlat(raw);
     const n = flat.length / 2;
     const cum = new Float32Array(n);
     for (let i = 1; i < n; i++) {
@@ -48,6 +84,9 @@ export async function loadNetwork() {
     }
     shapes.set(id, { pts: flat, cum });
   }
+
+  for (const key of ['land', 'parks', 'airports']) ground[key] = ground[key].map((poly) => poly.map(distortFlat));
+  for (const l of ground.labels) l.pos = distort(l.pos[0], l.pos[1]);
 
   const patterns = net.patterns.map(([route, shape, stops, idx, dt, count, night]) => {
     const pos = new Map();

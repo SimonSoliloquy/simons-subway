@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
-import { loadNetwork, placeTrip, pointAt, offsetFlat, shapeSign } from './network.js';
+import { loadNetwork, placeTrip, pointAt, offsetFlat, shapeSign, mapScale, MAX_MAG } from './network.js';
 import { TrainRenderer, consistOf } from './trains.js';
 import { initProtos, fetchTrips, fetchAlerts, fetchOutages, routeStatus, TRIP_FEEDS } from './realtime.js';
 
@@ -13,7 +13,7 @@ const STALE_S = 60;        // MTA terms: older data must be flagged as possibly 
 const KEEP_FAILED_FEED_S = 300; // a failed feed's last trains stay this long (flagged as not real time)
 const BASE_Y = 0.1;        // km above ground of the lowest route layer
 const TUBE_R = 0.016;      // km
-const LANE_W = 0.044;      // km between parallel services on a shared trunk
+const LANE_W = 0.1;        // map km between parallel services on a shared trunk
 // Every service is its own line, side by side where services share a trunk (as on the MTA map).
 const LANE_GROUPS = [['1', '2', '3'], ['4', '5', '6', '6X'], ['7', '7X'], ['A', 'C', 'E'], ['B', 'D', 'F', 'FX', 'M'], ['N', 'Q', 'R', 'W'], ['J', 'Z']];
 const lane = new Map();    // route -> {slot, off}
@@ -41,7 +41,7 @@ const MAP_COLORS = {
 };
 // service status box rows, one per trunk line (MTA service status box guidance)
 const TRUNKS = [['1', '2', '3'], ['4', '5', '6'], ['7'], ['A', 'C', 'E'], ['B', 'D', 'F', 'M'], ['G'], ['J', 'Z'], ['L'], ['N', 'Q', 'R', 'W'], ['GS', 'FS', 'H']];
-const VMAX = 0.025;        // km/s ≈ 90 km/h, a cap on catch-up speed
+const VMAX = 0.025 * MAX_MAG; // map km/s: ≈ 90 km/h where the schematic map is most enlarged
 // The MTA geographic map is drawn with Manhattan's avenues vertical: screen-up on the ground is
 // ~29° east of true north. Ground axes: +x east, +z south.
 const MAP_ROT = THREE.MathUtils.degToRad(29);
@@ -259,8 +259,8 @@ function buildLines() {
   buildLineSet(net.nightLines || {}, 'night');
 }
 
-// stations: a pillar from the ground up to the highest layer, and a node at each layer served
-let pillarMesh, nodeMesh, nodeInner, stationList, nodeList;
+// stations: a node at each layer served
+let nodeMesh, nodeInner, stationList, nodeList;
 const nodeLists = { day: [], night: [] };
 const adaMeshes = {};
 function buildNodes(mode) {
@@ -287,11 +287,6 @@ function buildStations() {
   nodeLists.night = buildNodes('night');
   nodeList = nodeLists.day;
   const maxNodes = Math.max(nodeLists.day.length, nodeLists.night.length);
-  pillarMesh = new THREE.InstancedMesh(
-    new THREE.CylinderGeometry(0.008, 0.008, 1, 6).translate(0, 0.5, 0),
-    new THREE.MeshBasicMaterial({ color: C.grey, transparent: true, opacity: 0.6 }),
-    stationList.length,
-  );
   // map symbols: black dot = local stop; white circle with black outline = express & local stop.
   // Node colour is per instance so the accessible map can grey out non-accessible stops.
   const disc = new THREE.CylinderGeometry(1, 1, 1, 24).translate(0, 0.5, 0);
@@ -314,7 +309,7 @@ function buildStations() {
     partOuter: mk(diamond, C.adaBlue), partInner: mk(diamond, C.white),
     warnOuter: mk(tri, C.ink), warnInner: mk(tri, C.warn),
   });
-  scene.add(pillarMesh, nodeMesh, nodeInner);
+  scene.add(nodeMesh, nodeInner);
   layoutStations();
 }
 function stationTop(st) {
@@ -325,27 +320,26 @@ const _ink = new THREE.Color(C.ink), _grey = new THREE.Color(C.grey);
 function layoutStations() {
   const m = new THREE.Matrix4(), q = new THREE.Quaternion(), s = new THREE.Vector3(), p = new THREE.Vector3();
   const r = tubeRadius.value, top = r * 1.02, t = r * 0.25;
-  stationList.forEach((st, i) => {
-    const pr = r * 0.35 / 0.008; // pillar thickness follows line weight
-    m.compose(p.set(st.x, 0, st.z), q, routesOf(st).length ? s.set(pr, stationTop(st), pr) : s.set(0, 0, 0));
-    pillarMesh.setMatrixAt(i, m);
-  });
   let w = 0;
+  // bold symbols when zoomed in; when the whole city is on screen they shrink toward the line
+  // width so neighbouring stations don't merge into beads
+  const far = Math.min(1, Math.max(0, (state.wpp - 0.01) / 0.04));
+  const kLocal = 1.4 - 0.3 * far, kExpress = 1.85 - 0.5 * far, kInner = 1.3 - 0.35 * far;
   nodeList.forEach((n, i) => {
     const y = heightOf(n.route) + top;
     const dim = state.ada && n.st.ada === 0; // non-accessible: a small grey dot
-    const rad = dim ? r * 0.8 : r * (n.express ? 1.55 : 1.15);
+    const rad = dim ? r * 1.0 : r * (n.express ? kExpress : kLocal);
     m.compose(p.set(n.x, y, n.z), q, s.set(rad, t, rad));
     nodeMesh.setMatrixAt(i, m);
     nodeMesh.setColorAt(i, dim ? _grey : _ink);
     if (n.express && !dim) {
-      m.compose(p.set(n.x, y + t * 0.5, n.z), q, s.set(r * 1.05, t, r * 1.05));
+      m.compose(p.set(n.x, y + t * 0.5, n.z), q, s.set(r * kInner, t, r * kInner));
       nodeInner.setMatrixAt(w++, m);
     }
   });
   nodeMesh.count = nodeList.length;
   nodeInner.count = w;
-  pillarMesh.instanceMatrix.needsUpdate = nodeMesh.instanceMatrix.needsUpdate = nodeInner.instanceMatrix.needsUpdate = true;
+  nodeMesh.instanceMatrix.needsUpdate = nodeInner.instanceMatrix.needsUpdate = true;
   if (nodeMesh.instanceColor) nodeMesh.instanceColor.needsUpdate = true;
   layoutAda();
 }
@@ -472,7 +466,7 @@ function updateTrains(dt) {
   if (state.revealClock >= 0) state.revealClock += dt;
   // Cars are drawn as symbols: R62 proportions, scaled with zoom so they stay legible
   // (about 1.5x real length up close, 6x at city scale), cross-section fattened further.
-  const lenK = Math.min(4, Math.max(1, state.zoomK));          // never shorter than real
+  const lenK = Math.min(5, Math.max(1, state.zoomK));          // never shorter than real
   drawnTrains = [];
   trainRenderer.begin();
   for (const trip of state.trips.values()) {
@@ -520,8 +514,8 @@ function updateTrains(dt) {
     v.pos = pos;
     if (!visible) continue;
     const { len } = consistOf(trip.route);
-    // cars about as wide as their line, which far out is wider than the zoom factor alone gives
-    const girth = Math.max(lenK * 2, (tubeRadius.value * 1.9) / (0.169 * len));
+    // slimmer than the line, so a train reads as a silver car riding inside its route colour
+    const girth = Math.max(lenK * 2, (tubeRadius.value * 1.25) / (0.169 * len));
     _c.set(waiting ? 0xe4e6e8 : 0x9aa1a8);
     if (sel) _c.set(C.ink);
     _sc.copy(routeColor.get(trip.route) || _w);
@@ -779,7 +773,7 @@ function renderDetails() {
     el.innerHTML = `
       <div class="head">${bullet(t.route)}<div><h3>to ${esc(destName(t))}</h3><div class="sub">${t.dir === 'N' ? 'Northbound' : 'Southbound'} · ${esc(t.trainId || t.id)}</div></div><button class="close" aria-label="Close">×</button></div>
       <div style="margin-bottom:6px">${t.assigned ? '<span class="tag">assigned</span>' : '<span class="tag">unassigned</span>'}${t.delayed ? '<span class="tag bad">delayed</span>' : ''}${stale ? '<span class="tag bad">not moving</span>' : ''}</div>
-      <div class="sub" style="margin-bottom:6px">${where}${trainView.get(t.id)?.shape ? ` · est. ${Math.round(trainView.get(t.id).speed * 3600)} km/h` : ''}</div>
+      <div class="sub" style="margin-bottom:6px">${where}${trainView.get(t.id)?.shape ? ` · est. ${Math.round(trainView.get(t.id).speed * 3600 / mapScale(trainView.get(t.id).x, trainView.get(t.id).z))} km/h` : ''}</div>
       <table>${t.stus.slice(0, 16).map((s) => `<tr class="click" data-station="${esc(s.parent)}"><td>${esc(net.stations.get(s.parent)?.name || s.stop)}${s.track ? ` <span class="tag">trk ${esc(s.track)}</span>` : ''}</td><td class="t">${mins(s.arr, now)} <span class="muted">${nyTime(s.arr).replace(/:\d\d /, ' ')}</span></td></tr>`).join('')}</table>
       <button class="act" id="follow">${state.follow ? 'Stop following' : 'Follow train'}</button>`;
   }
@@ -1116,7 +1110,7 @@ function updateZoom() {
   state.zoomK = k;
   state.wpp = wpp;
   // far out, parallel services touch like the map's bands, and lines never get thinner than ~3 px
-  tubeRadius.value = Math.max(Math.min(LANE_W / 2, Math.max(0.0035, 0.0032 * k)), wpp * 1.6);
+  tubeRadius.value = Math.max(Math.min(LANE_W * 0.45, Math.max(0.012, 0.016 * k)), wpp * (innerWidth <= 760 ? 2.2 : 3.0));
   scene.fog.near = Math.max(45, dist * 1.3);
   scene.fog.far = scene.fog.near + 75;
   layoutStations();
