@@ -17,7 +17,7 @@ lines / nightLines / station route lists come from the regular feed only. Staten
 Live trips are matched to a pattern on the client by stop sequence (live trip_ids often carry
 origin times that differ from the static schedule, so exact trip_id matching is unreliable).
 """
-import csv, datetime, json, math, os, re, statistics, sys
+import csv, datetime, heapq, json, math, os, re, statistics, sys
 from collections import defaultdict, Counter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -278,9 +278,27 @@ def dp(pts, lo, hi, tol2, keep):
             stack += [(a, bi), (bi, b)]
 
 
+# station complexes (e.g. 14 St-Union Sq = 635 + R20 + L03): union-find over in-system transfers
+complex_of = {sid: sid for sid in parents}
+
+
+def find(x):
+    while complex_of[x] != x:
+        complex_of[x] = complex_of[complex_of[x]]
+        x = complex_of[x]
+    return x
+
+
+for r in rows("transfers.txt"):
+    a, b = parent_of.get(r["from_stop_id"]), parent_of.get(r["to_stop_id"])
+    if a in complex_of and b in complex_of and a != b:
+        complex_of[find(a)] = find(b)
+
 # Patterns whose stops do not lie on their shape (supplemented reroutes such as an A via the F line or a
 # D via the Sea Beach line: the MTA gives them the usual shape or none at all) get a stitched shape: each
-# hop between stops taken from a regular pattern that makes the same hop, else a straight line.
+# hop between stops taken from a regular pattern that makes the same hop, else routed over the track
+# network (see route_hop), so a rerouted train never cuts across the map between two lines. A straight
+# line is only the last resort, and the build says so.
 STOP_OFF_SHAPE = 0.2   # km
 
 
@@ -303,7 +321,53 @@ for i in keep_idx:
             hop_geom.setdefault((st[k], st[k + 1]), seg)
             hop_geom.setdefault((st[k + 1], st[k]), seg[::-1])
 
-stitched, n_straight = {}, 0
+# The track network: every hop a regular pattern makes (either direction), plus short links between
+# the platforms of one station complex, which is where a rerouted train changes lines (an F running
+# onto 8 Av at W 4 St). A link costs several times its length, so real track is always preferred.
+COMPLEX_LINK_MAX, COMPLEX_LINK_COST = 0.6, 3   # km, cost factor
+track = defaultdict(list)   # station -> [(next station, cost, points)]
+for (a, b), seg in hop_geom.items():
+    track[a].append((b, sum(math.sqrt(d2(p, q)) for p, q in zip(seg, seg[1:])), seg))
+by_complex = defaultdict(list)
+for sid in parents:
+    by_complex[find(sid)].append(sid)
+for ids in by_complex.values():
+    for a in ids:
+        for b in ids:
+            d = math.sqrt(d2(station_xy[a], station_xy[b]))
+            if a != b and d < COMPLEX_LINK_MAX:
+                track[a].append((b, 0.05 + COMPLEX_LINK_COST * d, [station_xy[a], station_xy[b]]))
+
+
+def route_hop(a, b):
+    """Track from station a to station b for a hop no regular pattern makes (an express run over local
+    track, a switch between lines): the cheapest way over the track network, or None if there is none
+    within a sensible detour."""
+    limit = 3 * math.sqrt(d2(station_xy[a], station_xy[b])) + 3
+    best, via, heap = {a: 0}, {}, [(0, a)]
+    while heap:
+        du, u = heapq.heappop(heap)
+        if u == b:
+            break
+        if du > best.get(u, float("inf")) or du > limit:
+            continue
+        for v, w, seg in track[u]:
+            if du + w < best.get(v, float("inf")):
+                best[v], via[v] = du + w, (u, seg)
+                heapq.heappush(heap, (du + w, v))
+    if b not in via or best[b] > limit:
+        return None
+    segs, s = [], b
+    while s != a:
+        s, seg = via[s]
+        segs.append(seg)
+    pts = []
+    for seg in reversed(segs):
+        pts += seg[1:] if pts and d2(seg[0], pts[-1]) < 1e-8 else seg
+    return pts
+
+
+stitched, n_routed, straight = {}, 0, []
 for i in keep_idx:
     route, shape, st = patterns[i]
     if fits(raw_shapes[shape], st):
@@ -315,13 +379,17 @@ for i in keep_idx:
         for a, b in zip(st, st[1:]):
             seg = hop_geom.get((a, b))
             if not seg:
-                n_straight += 1
+                seg = route_hop(a, b)
+                n_routed += seg is not None
+            if not seg:
+                straight.append(f"{route} {a}-{b}")
                 seg = [station_xy[a], station_xy[b]]
             pts += seg[1:] if d2(seg[0], pts[-1]) < 1e-8 else seg
         raw_shapes[sid] = pts
         stitched[st] = sid
     patterns[i] = (route, stitched[st], st)
-print(f"stitched {len(stitched)} shapes for patterns off their shape ({n_straight} straight hops)", file=sys.stderr)
+print(f"stitched {len(stitched)} shapes for patterns off their shape ({n_routed} hops routed over other track, "
+      f"{len(straight)} straight{': ' + ', '.join(straight) if straight else ''})", file=sys.stderr)
 
 used_shapes = {patterns[i][1] for i in keep_idx}
 shape_pins = defaultdict(set)
@@ -383,22 +451,6 @@ def cover(weight, eligible, pair_ok=lambda route, pair: True):
 lines = cover(shape_trips, [i for i in keep_idx if cnt_reg[i]],
               lambda route, pair: route_pair_trips[(route, pair)] >= map_min(route))
 nightLines = cover(shape_night, [i for i in keep_idx if cnt_night[i] >= NIGHT_MIN_TRIPS])
-
-# station complexes (e.g. 14 St-Union Sq = 635 + R20 + L03): union-find over in-system transfers
-complex_of = {sid: sid for sid in parents}
-
-
-def find(x):
-    while complex_of[x] != x:
-        complex_of[x] = complex_of[complex_of[x]]
-        x = complex_of[x]
-    return x
-
-
-for r in rows("transfers.txt"):
-    a, b = parent_of.get(r["from_stop_id"]), parent_of.get(r["to_stop_id"])
-    if a in complex_of and b in complex_of and a != b:
-        complex_of[find(a)] = find(b)
 
 ada = {}
 for r in json.load(open(os.path.join(ROOT, "raw", "stations_ada.json"))):
