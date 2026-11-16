@@ -150,8 +150,43 @@ function sideAt(shape, s) {
   const tx = x1 - x0, tz = z1 - z0, l = Math.hypot(tx, tz) || 1;
   return [-tz / l, tx / l];
 }
-/** Sideways offset (km, positive = right of travel along `sid`) of a route's trunk line. */
-const slotOffset = (route, sid) => slotOf(route) * shapeSign(sid) * SLOT_W * tubeRadius.value;
+// Where the MTA map sets two trunks the other way round from their usual slots, a route's slot
+// changes near a station, or along a run of stations (`near`, in order), blending over `fade` km
+// so the line shifts sideways smoothly.
+const SLOT_OVERRIDES = [
+  // Queensboro Plaza: the N/W run on the north side of the 7 (they leave north for Astoria, the
+  // 7 east along Queens Blvd) and then, past Queens Plaza up to 39 Av, on the west side of the
+  // E/F/M/R line that their track runs along here, instead of under the 7 and then on the E
+  { routes: ['N', 'W'], near: ['Queensboro Plaza', 'Queens Plaza', '39 Av-Dutch Kills'], within: 0.3, fade: 0.4, slot: -2 },
+  { routes: ['7', '7X'], near: ['Queensboro Plaza'], within: 0.5, fade: 0.4, slot: -1 },
+];
+let slotZones = [];
+function resolveSlotZones() {
+  const at = (name) => [...net.stations.values()].find((st) => st.name === name);
+  slotZones = SLOT_OVERRIDES.map((o) => {
+    const sts = o.near.map(at);
+    return sts.every(Boolean) ? { ...o, routes: new Set(o.routes), pts: sts.length > 1 ? sts : [sts[0], sts[0]] } : null;
+  }).filter(Boolean);
+}
+/** A route's slot at a point (its trunk's slot, unless an override applies there). */
+function slotAt(route, x, z) {
+  let slot = slotOf(route);
+  for (const o of slotZones) {
+    if (!o.routes.has(route)) continue;
+    let d = Infinity;
+    for (let i = 0; i + 1 < o.pts.length; i++) {
+      const a = o.pts[i], b = o.pts[i + 1], dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+      const u = l2 ? Math.min(1, Math.max(0, ((x - a.x) * dx + (z - a.z) * dz) / l2)) : 0;
+      d = Math.min(d, Math.hypot(x - a.x - dx * u, z - a.z - dz * u));
+    }
+    if (d >= o.within + o.fade) continue;
+    const t = Math.min(1, Math.max(0, (o.within + o.fade - d) / o.fade));
+    slot += (o.slot - slot) * t * t * (3 - 2 * t);
+  }
+  return slot;
+}
+/** Sideways offset (km, positive = right of travel along `sid`) of a route's trunk line at a point. */
+const slotOffset = (route, sid, x, z) => slotAt(route, x, z) * shapeSign(sid) * SLOT_W * tubeRadius.value;
 
 // ---------- which line is drawn on top at crossings ----------
 // Where two trunk lines cross, one is drawn over the other, as on the MTA map (read off
@@ -305,8 +340,9 @@ function zoomableTube(mat, k = 1) {
 }
 
 /** Tube along a centreline, with a per-vertex sideways unit vector × trunk slot (aSide) so the
- *  shader can set trunks side by side at whatever line width the zoom calls for. */
-function trunkTube(shape, a, b, slotSigned, route, y = 0, radial = 6) {
+ *  shader can set trunks side by side at whatever line width the zoom calls for. `sign` is the
+ *  shape's direction sign (shapeSign). */
+function trunkTube(shape, a, b, sign, route, y = 0, radial = 6) {
   const pts = [];
   for (let i = a; i <= b; i++) pts.push(new THREE.Vector3(shape.pts[2 * i], y, shape.pts[2 * i + 1]));
   if (pts.length < 2) return null;
@@ -322,7 +358,7 @@ function trunkTube(shape, a, b, slotSigned, route, y = 0, radial = 6) {
     // ring centre: where this ring sits on the centreline
     let cx = 0, cz = 0;
     for (let j = 0; j < radial; j++) { cx += pos.getX(i * ring + j); cz += pos.getZ(i * ring + j); }
-    const d = liftDistance(cx / radial, cz / radial, trunk);
+    const d = liftDistance(cx / radial, cz / radial, trunk), slotSigned = slotAt(route, cx / radial, cz / radial) * sign;
     for (let j = 0; j < ring; j++) {
       const k = i * ring + j;
       side[k * 3] = sx * slotSigned; side[k * 3 + 2] = sz * slotSigned;
@@ -392,7 +428,7 @@ function buildLineSet(lines, key) {
     const mat = routeMats.get(route);
     const group = new THREE.Group();
     for (const { sid, shape, a, b } of routeOffsetLines[key].get(route) || []) {
-      const geo = trunkTube(shape, a, b, slotOf(route) * shapeSign(sid), route);
+      const geo = trunkTube(shape, a, b, shapeSign(sid), route);
       if (geo) group.add(new THREE.Mesh(geo, mat));
     }
     group.userData.route = route;
@@ -401,6 +437,7 @@ function buildLineSet(lines, key) {
   }
 }
 function buildLines() {
+  resolveSlotZones();
   // centrelines first, so the crossings are known before the tubes are built
   // a shape is drawn from its first stop to its last (a few run on past the terminal)
   const range = new Map();
@@ -482,7 +519,7 @@ function buildNodes(mode) {
           [sx, sz] = sideAt(shape, shape.cum[a + hit / 2]);
         }
       }
-      const slot = sid ? slotOf(route) * shapeSign(sid) : 0;
+      const slot = sid ? slotAt(route, bx, bz) * shapeSign(sid) : 0;
       list.push({ st, route, routes: group, bx, bz, sx, sz, slot, x: bx, z: bz, express: isExpressStop(st.id, group) });
     }
   }
@@ -735,17 +772,16 @@ function lerpAngle(a, b, t) { let d = b - a; while (d > Math.PI) d -= 2 * Math.P
 // Place each car of the consist on the track: position and heading come from the two bogie
 // points, so the train bends through curves instead of sliding as a rigid block.
 /** Sideways place of a train: on its trunk's slot, on the right-hand half of the line. */
-const trainOffset = (trip) => slotOffset(trip.route, trip.pattern.shape) + tubeRadius.value * 0.6;
+const trainOffset = (trip, x, z) => slotOffset(trip.route, trip.pattern.shape, x, z) + tubeRadius.value * 0.6;
 function consistCars(v, trip, len, lenK, n) {
   const cars = [];
   const L = len * lenK;
   if (v.shape) {
-    const off = trainOffset(trip);
     for (let i = 0; i < n; i++) {
       const c = v.s - (i + 0.5) * L;
       const [xf, zf] = pointAt(v.shape, c + L * 0.35), [xb, zb] = pointAt(v.shape, c - L * 0.35);
       const h = Math.atan2(zf - zb, xf - xb);
-      const mx = (xf + xb) / 2, mz = (zf + zb) / 2, [sx, sz] = sideAt(v.shape, c);
+      const mx = (xf + xb) / 2, mz = (zf + zb) / 2, [sx, sz] = sideAt(v.shape, c), off = trainOffset(trip, mx, mz);
       cars.push({ x: mx + sx * off, z: mz + sz * off, y: v.y + trunkLift(mx, mz, trip.route), h });
     }
   } else {
@@ -812,7 +848,7 @@ function arrivalGlow(trip, shape, s) {
     glowPool.push(g);
   }
   const [x, z] = pointAt(shape, s), [sx, sz] = sideAt(shape, s);
-  const off = trainOffset(trip);
+  const off = trainOffset(trip, x, z);
   const y = heightOf(trip.route) + tubeRadius.value * 2;
   g.disc.position.set(x + sx * off, y, z + sz * off);
   g.spark.position.copy(g.disc.position);
@@ -955,7 +991,7 @@ function updateTrains(dt) {
         if (before < at && v.s >= at && visible && v.arrived !== pos.to) { v.arrived = pos.to; arrivalGlow(trip, pos.shape, pos.sNext); }
       }
       const [x, z, h] = pointAt(pos.shape, v.s);
-      const off = trainOffset(trip), [sx, sz] = sideAt(pos.shape, v.s);
+      const off = trainOffset(trip, x, z), [sx, sz] = sideAt(pos.shape, v.s);
       v.x = x + sx * off; v.z = z + sz * off;
       v.h = h;
     } else {
@@ -1003,7 +1039,7 @@ function updatePath() {
   const j = p.pos.get(trip.stus[0].parent);
   const shape = net.shapes.get(p.shape);
   const a = p.idx[Math.max(0, j - 1)], b = p.idx[p.idx.length - 1];
-  const geo = trunkTube(shape, a, b, slotOf(trip.route) * shapeSign(p.shape), trip.route, heightOf(trip.route), 8);
+  const geo = trunkTube(shape, a, b, shapeSign(p.shape), trip.route, heightOf(trip.route), 8);
   if (!geo) return;
   pathMesh = new THREE.Mesh(
     geo,
@@ -2079,6 +2115,7 @@ async function start() {
   if (import.meta.env.DEV) {
     window.__subway = {
       state, trainView, ridesApi, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, get glows() { return glowPool; }, get crossings() { return crossings; }, camera, controls, net, select, setNight, setAda, goHome,
+      lines: routeOffsetLines, nodes: nodeLists, links: linkLists, sideAt, slotOf, slotAt, trunkOf, tubeRadius, SLOT_W,
       step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); updateGlows(dt); updateRideGlow(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
     };
   }
