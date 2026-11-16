@@ -82,6 +82,13 @@ rider's stop, reaches its last stop, leaves the feed, or the rider taps **I got 
 watching the ride can report the first three. Open rides end on their own after 4 hours. Rows are
 kept, so a link keeps working and shows the previous ride after it ends. If the Worker is unreachable, sharing falls back to `?trip=<trip id>&to=<stop>`.
 
+The Worker shares the Cloudflare account's free 100,000 requests a day with the games'
+leaderboards, so the site is frugal with it: the rider's page reads its ride once and writes only
+when something changes, a watcher reads once a minute while the page is on screen, errors back off up
+to 30 minutes, and `src/budget.js` caps every page at one read per 30 s and 40 requests an hour.
+`npm test` (run before every build) checks that cap, that only `ridesApi` calls the Worker, and that
+nothing calls it from the frame loop, a timer or itself.
+
     cd worker
     npx wrangler d1 migrations apply leaderboards --remote   # create the table
     npx wrangler deploy

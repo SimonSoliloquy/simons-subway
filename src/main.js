@@ -4,6 +4,7 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { loadNetwork, placeTrip, pointAt, offsetFlat, shapeSign, mapScale, MAX_MAG } from './network.js';
 import { TrainRenderer, consistOf } from './trains.js';
+import { createBudget } from './budget.js';
 import { initProtos, fetchTrips, fetchAlerts, fetchOutages, routeStatus, TRIP_FEEDS } from './realtime.js';
 
 const TRIP_REFRESH_MS = 15_000;
@@ -1317,15 +1318,43 @@ const END_TEXT = {
 };
 let ridePick = '';            // route chosen in the "On a train?" picker
 
+// The rides Worker shares the Cloudflare account's free daily request allowance with the games'
+// leaderboards, so every page is frugal with it: the rider's page reads the ride once (on load) and
+// only writes when something changes; a page watching someone else's ride reads it once a minute,
+// only while it is on screen. Any failure backs off (1, 2, 4 … up to 30 minutes) before trying again.
+// On top of that, a hard budget no caller can get around, so a bug can never again run the
+// allowance down (2026-11-15 a sync that re-ran itself used all 100,000 requests in under an hour):
+// reads at least 30 s apart, and at most 40 requests per page per hour, after which the page
+// stops calling the Worker altogether.
+// test/rides-budget.test.mjs checks both, and that nothing reaches the Worker except through here.
+const RIDE_POLL_MS = 60_000;
+const ridesBudget = createBudget({ readGapMs: 30_000, perHour: 40 });
+let ridesFails = 0, ridesOffUntil = 0;
 async function ridesApi(path = '', body) {
-  const res = await fetch(RIDES_API + path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : { cache: 'no-store' });
+  if (Date.now() < ridesOffUntil) throw Object.assign(new Error('rides service backing off'), { status: 0 });
+  const over = ridesBudget(!body);
+  if (over) {
+    console.warn(`rides request skipped: ${over}`);
+    throw Object.assign(new Error(over), { status: 0 });
+  }
+  let res;
+  try {
+    res = await fetch(RIDES_API + path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : { cache: 'no-store' });
+  } catch (err) { res = null; }
+  // 429, 5xx (including Cloudflare's "limit exceeded") or no answer: back off
+  if (!res || res.status === 429 || res.status >= 500) {
+    ridesFails++;
+    ridesOffUntil = Date.now() + Math.min(30 * 60_000, 60_000 * 2 ** (ridesFails - 1));
+    throw Object.assign(new Error(res ? `HTTP ${res.status}` : 'rides service unreachable'), { status: res?.status || 0 });
+  }
+  ridesFails = 0;
   const j = await res.json().catch(() => ({}));
   if (!res.ok) throw Object.assign(new Error(j.error || `HTTP ${res.status}`), { status: res.status });
   return j;
 }
 function saveRide() {
   try {
-    if (state.ride) localStorage.setItem(RIDE_KEY, JSON.stringify({ ...state.ride, pendingFly: false }));
+    if (state.ride) localStorage.setItem(RIDE_KEY, JSON.stringify({ ...state.ride, pendingFly: false, synced: false }));
     else localStorage.removeItem(RIDE_KEY);
   } catch { /* storage blocked: the ride lasts for this page only */ }
 }
@@ -1347,9 +1376,15 @@ function loadRide() {
   syncRide();
 }
 /** Pull the stored ride (destination changes, and ends seen by any page) for rides with an id. */
+let lastSync = 0;
 async function syncRide() {
   const r = state.ride;
-  if (!r?.id || r.ended && !r.shared) return;
+  // an ended ride never changes again; the rider's own page knows its ride, so it reads it only
+  // once after loading; a watcher reads once a minute while the page is on screen
+  if (!r?.id || r.ended || (!r.shared && r.synced)) return;
+  if (document.visibilityState === 'hidden' || Date.now() - lastSync < RIDE_POLL_MS) return;
+  lastSync = Date.now();
+  r.synced = true;
   try {
     const s = await ridesApi('/' + r.id);
     if (state.ride !== r) return;
@@ -1358,7 +1393,6 @@ async function syncRide() {
     if (s.status === 'ended' && !r.ended) r.ended = { reason: s.end_reason, station: s.end_station, at: s.ended_at };
     saveRide();
     renderRide();
-    syncRide();
   } catch (err) {
     if (err.status === 404 && r.shared) { r.ended = { reason: 'missing' }; renderRide(); }
   }
@@ -2038,7 +2072,7 @@ async function start() {
   atHome = true;
   if (import.meta.env.DEV) {
     window.__subway = {
-      state, trainView, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, get glows() { return glowPool; }, get crossings() { return crossings; }, camera, controls, net, select, setNight, setAda, goHome,
+      state, trainView, ridesApi, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, get glows() { return glowPool; }, get crossings() { return crossings; }, camera, controls, net, select, setNight, setAda, goHome,
       step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); updateGlows(dt); updateRideGlow(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
     };
   }

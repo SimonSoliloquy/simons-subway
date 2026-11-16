@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "fetch": "sh scripts/fetch_raw.sh"
+    "fetch": "sh scripts/fetch_raw.sh",
+    "test": "node --test test/*.test.mjs",
+    "prebuild": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "protobufjs": "^8.8.1",
