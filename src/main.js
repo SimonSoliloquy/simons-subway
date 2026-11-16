@@ -89,10 +89,12 @@ controls.maxPolarAngle = Math.PI * 0.49;
 controls.minDistance = 0.04;
 controls.maxDistance = 120;
 controls.screenSpacePanning = false;
-// map-style controls: drag (one finger) moves the map, right-drag (two fingers) turns and tilts
-// the view, scroll or pinch zooms
+// map-style controls: drag (one finger) moves the map, right-drag turns and tilts the view,
+// scroll zooms. On a phone, as in map apps: one finger moves; with two, pinch zooms, dragging
+// moves, twisting turns the map, and dragging both fingers straight up or down tilts it (see
+// twoFingerGestures below; OrbitControls only does the pinch and the two-finger move).
 controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
-controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE };
+controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_PAN };
 // Rotation settles quickly so it stops where it is let go; panning keeps its soft glide.
 const ROTATING = new Set([0, 3, 6]); // OrbitControls states: ROTATE, TOUCH_ROTATE, TOUCH_DOLLY_ROTATE
 function tuneDamping() {
@@ -1966,6 +1968,80 @@ function updateHover() {
   tooltip.style.left = Math.min(pointer.x + 14, innerWidth - 270) + 'px';
   tooltip.style.top = pointer.y + 14 + 'px';
 }
+
+// ---------- two-finger twist and tilt on touch screens ----------
+// OrbitControls turns the view only from the midpoint of the two fingers, so a twist did nothing and
+// a sideways drag spun the map. Here a twist turns the map around the point between the fingers
+// (after a few degrees, so a pinch doesn't wobble it), and a two-finger drag straight up or down,
+// fingers side by side, tilts it; that tilt is decided in the first few pixels and then holds for
+// the gesture, with OrbitControls' pinch and move paused.
+const twoFingerGestures = (() => {
+  const pts = new Map();          // pointerId -> {x, y}
+  let g = null;                   // the gesture under way while two fingers are down
+  const ray = new THREE.Raycaster(), ground = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  const ndc = new THREE.Vector2(), hit = new THREE.Vector3(), off = new THREE.Vector3(), sph = new THREE.Spherical();
+  const groundAt = (x, y) => {
+    const r = canvas.getBoundingClientRect();
+    ndc.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ndc, camera);
+    return ray.ray.intersectPlane(ground, hit) ? hit.clone() : null;
+  };
+  const pair = () => { const [a, b] = [...pts.values()]; return { a, b, ang: Math.atan2(b.y - a.y, b.x - a.x), dist: Math.hypot(b.x - a.x, b.y - a.y), mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 }; };
+  const pause = (on) => { controls.enablePan = controls.enableZoom = !on; };
+  const end = () => { if (g) pause(false); g = null; };
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch') return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2) {
+      const p = pair();
+      g = { mode: null, start: p, last: p, twist: 0, turning: false, starts: new Map([...pts].map(([id, v]) => [id, { ...v }])) };
+      pause(true); // until the gesture is read as a tilt or not
+    } else end();
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'touch' || !pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (!g || pts.size !== 2) return;
+    const p = pair();
+    if (!g.mode) {
+      // read the gesture once the fingers have moved a little
+      const moves = [...pts].map(([id, v]) => ({ dx: v.x - g.starts.get(id).x, dy: v.y - g.starts.get(id).y }));
+      const far = Math.max(...moves.map((m) => Math.hypot(m.dx, m.dy))), near = Math.min(...moves.map((m) => Math.hypot(m.dx, m.dy)));
+      // touch events report one finger at a time: wait until both have moved (or one has gone far)
+      if (far < 10 || (near < 5 && far < 30)) return;
+      const sideBySide = Math.abs(Math.sin(g.start.ang)) < 0.55;            // within ~33° of level
+      const upDown = moves.every((m) => Math.abs(m.dy) > 1.5 * Math.abs(m.dx)) && Math.sign(moves[0].dy) === Math.sign(moves[1].dy);
+      const steady = Math.abs(p.dist / g.start.dist - 1) < 0.12;
+      g.mode = sideBySide && upDown && steady ? 'tilt' : 'map';
+      if (g.mode === 'map') pause(false);
+      // fall through: this move, and what came before it, counts from where the fingers started
+    }
+    if (g.mode === 'tilt') {
+      off.copy(camera.position).sub(controls.target);
+      sph.setFromVector3(off);
+      // fingers up tilts toward the horizon, as in map apps; the whole screen height is ~90°
+      sph.phi = Math.min(controls.maxPolarAngle, Math.max(0.001, sph.phi - (p.my - g.last.my) * (Math.PI / 2) / innerHeight));
+      off.setFromSpherical(sph);
+      camera.position.copy(controls.target).add(off);
+    } else {
+      let d = p.ang - g.last.ang;
+      if (d > Math.PI) d -= 2 * Math.PI; else if (d < -Math.PI) d += 2 * Math.PI;
+      g.twist += d;
+      if (!g.turning && Math.abs(g.twist) > 0.14) { g.turning = true; d = g.twist; } // ~8° before the map turns
+      const pivot = g.turning && groundAt(p.mx, p.my);
+      if (pivot) {
+        // turn camera and target together about the vertical through the point between the fingers,
+        // so the map turns with the fingers
+        const q = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), d);
+        for (const v of [camera.position, controls.target]) v.sub(pivot).applyQuaternion(q).add(pivot);
+        camera.lookAt(controls.target);
+      }
+    }
+    g.last = p;
+  });
+  for (const ev of ['pointerup', 'pointercancel']) canvas.addEventListener(ev, (e) => { pts.delete(e.pointerId); if (pts.size < 2) end(); });
+  return { get mode() { return g?.mode || null; } };
+})();
 
 // ---------- collapsible panels (all start closed) ----------
 const narrow = () => innerWidth <= 760;
