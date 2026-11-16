@@ -289,8 +289,12 @@ def find(x):
     return x
 
 
-for r in rows("transfers.txt"):
-    a, b = parent_of.get(r["from_stop_id"]), parent_of.get(r["to_stop_id"])
+# free in-system transfers the MTA map shows that the GTFS transfers.txt leaves out
+EXTRA_TRANSFERS = [
+    ("142", "R27"),   # South Ferry (1) - Whitehall St-South Ferry (R/W), one station complex since 2009
+]
+pairs = [(parent_of.get(r["from_stop_id"]), parent_of.get(r["to_stop_id"])) for r in rows("transfers.txt")]
+for a, b in pairs + EXTRA_TRANSFERS:
     if a in complex_of and b in complex_of and a != b:
         complex_of[find(a)] = find(b)
 

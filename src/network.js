@@ -85,6 +85,207 @@ function roundCorners(flat) {
   return out;
 }
 
+// ---------- one line per trunk, reaching its terminals ----------
+// The MTA map draws each trunk as one line: express and local share it, the express just
+// skipping stops. GTFS shapes follow the real tracks, and in places the express tracks take a
+// path of their own (Queens Blvd between 36 St and Northern Blvd, Culver around 15 St-Prospect
+// Park) that would draw as a second strand. There the express hop takes the path of a local
+// pattern running between the same two stops (same colour preferred), so the line and the
+// trains on it follow one strand. Shapes are flat [x, z, ...] arrays in map km.
+const HOP_DEV = 0.02;   // km: an express hop closer than this to the local path is left as it is
+const TERMINAL_PIN = 0.3; // km: a shape ending this close to its terminal station is pulled onto it
+const polyLen = (p, i0, i1) => { let l = 0; for (let i = i0; i < i1; i++) l += Math.hypot(p[2 * i + 2] - p[2 * i], p[2 * i + 3] - p[2 * i + 1]); return l; };
+function distToPolyline(x, z, p) {
+  let best = Infinity;
+  for (let i = 0; i + 3 < p.length; i += 2) {
+    const ax = p[i], az = p[i + 1], dx = p[i + 2] - ax, dz = p[i + 3] - az, l2 = dx * dx + dz * dz;
+    const t = l2 ? Math.min(1, Math.max(0, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
+    best = Math.min(best, Math.hypot(ax + dx * t - x, az + dz * t - z));
+  }
+  return best;
+}
+/** Make the shapes draw as the map does. `patterns` are the raw [route, shape, stops, idx, ...]
+ *  rows; their idx (vertex index per stop) is updated in place where vertices are spliced. */
+function mapShapes(shapes, patterns, stations, routes) {
+  const colour = (r) => routes[r]?.color || r;
+  const byStop = new Map(); // station id -> [[pattern, position]]
+  patterns.forEach((p) => p[2].forEach((s, k) => { if (!byStop.has(s)) byStop.set(s, []); byStop.get(s).push([p, k]); }));
+  const stopVerts = new Map(); // shape id -> Set of vertex indices that are some pattern's stop
+  for (const p of patterns) { if (!stopVerts.has(p[1])) stopVerts.set(p[1], new Set()); p[3].forEach((i) => stopVerts.get(p[1]).add(i)); }
+
+  // the local path from station a to station b, as a flat array (null: no local runs a..b)
+  const localCache = new Map();
+  const localPath = (a, b, route) => {
+    const key = `${a}|${b}|${colour(route)}`;
+    if (localCache.has(key)) return localCache.get(key);
+    let best = null, bs = 0;
+    for (const [q, qa] of byStop.get(a) || []) {
+      const qb = q[2].indexOf(b);
+      if (qb < 0 || Math.abs(qb - qa) < 2) continue;
+      const i = q[3][qa], j = q[3][qb], pts = shapes.get(q[1]);
+      if (!pts || i === j || (qb > qa) !== (j > i)) continue;
+      const score = (colour(q[0]) === colour(route) ? 1000 : 0) + Math.abs(qb - qa) + q[5] / 1e6;
+      if (score <= bs) continue;
+      const lo = Math.min(i, j), hi = Math.max(i, j), path = pts.slice(2 * lo, 2 * hi + 2);
+      if (j < i) for (let k = 0, n = path.length / 2; k < n / 2; k++) {
+        const m = n - 1 - k;
+        [path[2 * k], path[2 * m]] = [path[2 * m], path[2 * k]];
+        [path[2 * k + 1], path[2 * m + 1]] = [path[2 * m + 1], path[2 * k + 1]];
+      }
+      best = path; bs = score;
+    }
+    localCache.set(key, best);
+    return best;
+  };
+
+  // plan every express hop that leaves the local path, then splice (all reads see the original shapes)
+  const plans = new Map(); // shape id -> Map("ia,ib" -> inner points)
+  for (const [route, sid, stops, idx] of patterns) {
+    const pts = shapes.get(sid);
+    if (!pts) continue;
+    for (let k = 0; k + 1 < stops.length; k++) {
+      const ia = idx[k], ib = idx[k + 1];
+      if (ib <= ia || plans.get(sid)?.has(ia + ',' + ib)) continue;
+      const path = localPath(stops[k], stops[k + 1], route);
+      if (!path) continue;
+      let inside = false;
+      for (const v of stopVerts.get(sid)) if (v > ia && v < ib) { inside = true; break; }
+      if (inside) continue; // another pattern stops on this stretch of the shape
+      const n = path.length / 2, hopLen = polyLen(pts, ia, ib), pathLen = polyLen(path, 0, n - 1);
+      if (!hopLen || pathLen / hopLen > 1.5 || pathLen / hopLen < 0.67) continue;
+      if (Math.hypot(path[0] - pts[2 * ia], path[1] - pts[2 * ia + 1]) > 0.1 || Math.hypot(path[2 * n - 2] - pts[2 * ib], path[2 * n - 1] - pts[2 * ib + 1]) > 0.1) continue;
+      let dev = 0;
+      for (let i = ia + 1; i < ib; i++) dev = Math.max(dev, distToPolyline(pts[2 * i], pts[2 * i + 1], path));
+      // a hop with no vertex in between: check its midpoint
+      if (ib === ia + 1) dev = distToPolyline((pts[2 * ia] + pts[2 * ib]) / 2, (pts[2 * ia + 1] + pts[2 * ib + 1]) / 2, path);
+      if (dev < HOP_DEV) continue;
+      if (!plans.has(sid)) plans.set(sid, new Map());
+      plans.get(sid).set(ia + ',' + ib, path.slice(2, -2));
+    }
+  }
+  const onShape = new Map();
+  for (const p of patterns) { if (!onShape.has(p[1])) onShape.set(p[1], []); onShape.get(p[1]).push(p); }
+  for (const [sid, plan] of plans) {
+    const pts = shapes.get(sid);
+    let floor = Infinity; // hops are applied from the end of the shape back; skip any overlap
+    const hops = [...plan].map(([k, inner]) => [...k.split(',').map(Number), inner]).sort((x, y) => y[0] - x[0]);
+    for (const [ia, ib, inner] of hops) {
+      if (ib > floor) continue;
+      floor = ia;
+      const delta = inner.length / 2 - (ib - ia - 1);
+      pts.splice(2 * ia + 2, 2 * (ib - ia - 1), ...inner);
+      for (const p of onShape.get(sid)) for (let k = 0; k < p[3].length; k++) if (p[3][k] >= ib) p[3][k] += delta;
+    }
+  }
+
+  // a line ends at its terminal's station symbol (the Q's shape stops ~140 m short of 96 St)
+  for (const [, sid, stops, idx] of patterns) {
+    const pts = shapes.get(sid), n = pts ? pts.length / 2 : 0;
+    if (n < 2) continue;
+    for (const [k, v] of [[0, 0], [stops.length - 1, n - 1]]) {
+      const st = stations.get(stops[k]);
+      if (!st || idx[k] !== v) continue;
+      const d = Math.hypot(st.x - pts[2 * v], st.z - pts[2 * v + 1]);
+      if (d > 0.005 && d < TERMINAL_PIN) { pts[2 * v] = st.x; pts[2 * v + 1] = st.z; }
+    }
+  }
+
+  // where the MTA map runs a line beside another trunk that its GTFS track crosses or runs on
+  // top of: that stretch is moved onto the other line's track, and the slots set them side by side
+  for (const { routes: rs, onto, near, within, full } of SHARED_TRACK) {
+    const [a, b = a] = near.map((id) => stations.get(id));
+    if (!a || !b) continue;
+    const dx = b.x - a.x, dz = b.z - a.z, l2 = dx * dx + dz * dz;
+    const inZone = (x, z) => { const u = l2 ? Math.min(1, Math.max(0, ((x - a.x) * dx + (z - a.z) * dz) / l2)) : 0; return Math.hypot(x - a.x - dx * u, z - a.z - dz * u) < within; };
+    const targets = [...new Set(patterns.filter((p) => onto.includes(p[0])).map((p) => p[1]))].map((id) => shapes.get(id)).filter(Boolean);
+    for (const sid of new Set(patterns.filter((p) => rs.includes(p[0])).map((p) => p[1]))) {
+      const pts = shapes.get(sid), n = pts.length / 2, zone = [];
+      for (let i = 0; i < n; i++) if (inZone(pts[2 * i], pts[2 * i + 1])) zone.push(i);
+      if (!zone.length) continue;
+      // the other line's shape that runs closest along this stretch
+      let target = null, bs = 0;
+      for (const t of targets) {
+        const close = zone.filter((i) => distToPolyline(pts[2 * i], pts[2 * i + 1], t) < full).length;
+        if (close > bs) { bs = close; target = t; }
+      }
+      if (!target) continue;
+      // vertices within `full` go onto it; a little further out they are drawn part of the way
+      // there (so the line eases onto the other), further still they stay
+      const runs = [];
+      for (const i of zone) {
+        const d = distToPolyline(pts[2 * i], pts[2 * i + 1], target);
+        if (d < full) {
+          if (runs.length && runs.at(-1)[1] === i - 1) runs.at(-1)[1] = i; else runs.push([i, i]);
+        } else if (d < SHARED_GAP) {
+          const w = (SHARED_GAP - d) / (SHARED_GAP - full), k = w * w * (3 - 2 * w);
+          const q = nearestOn(pts[2 * i], pts[2 * i + 1], target);
+          pts[2 * i] += (q[0] - pts[2 * i]) * k; pts[2 * i + 1] += (q[1] - pts[2 * i + 1]) * k;
+        }
+      }
+      const pats = patterns.filter((p) => p[1] === sid);
+      for (const [i0, i1] of runs.reverse()) snapOnto(pts, i0, i1, target, pats);
+    }
+  }
+}
+// Where the GTFS track of one line crosses or runs on top of another's but the MTA map draws them
+// side by side. `near`: one station, or two (the stretch between them); `within` km of it.
+const SHARED_TRACK = [
+  // the 1 into South Ferry: its shape runs straight from Rector St across the 4/5 and ends on top
+  // of them; on the MTA map it reaches South Ferry beside the 4/5, without crossing them
+  { routes: ['1'], onto: ['4', '5'], near: ['142'], within: 0.6, full: 0.1 },
+  // the N/W between Queensboro Plaza and 39 Av run along the E/F/M/R a few metres off its track,
+  // half covering it; on its track, their slot (main.js) sets them just west of it
+  { routes: ['N', 'W'], onto: ['E'], near: ['G21', 'R08'], within: 0.25, full: 0.03 },
+];
+const SHARED_GAP = 0.1; // km: beyond this from the other line, a stretch stays where it is
+function nearestOn(x, z, p) {
+  let best = null, bd = Infinity;
+  for (let i = 0; i + 3 < p.length; i += 2) {
+    const ax = p[i], az = p[i + 1], dx = p[i + 2] - ax, dz = p[i + 3] - az, l2 = dx * dx + dz * dz;
+    const t = l2 ? Math.min(1, Math.max(0, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
+    const d = Math.hypot(ax + dx * t - x, az + dz * t - z);
+    if (d < bd) { bd = d; best = [ax + dx * t, az + dz * t]; }
+  }
+  return best;
+}
+/** Move vertices i0..i1 of a shape onto a target polyline (adding the target's vertices in
+ *  between, so the stretch follows its curves), and update the stop indices of `pats`. */
+function snapOnto(pts, i0, i1, target, pats) {
+  const tn = target.length / 2, cum = [0];
+  for (let i = 1; i < tn; i++) cum.push(cum[i - 1] + Math.hypot(target[2 * i] - target[2 * i - 2], target[2 * i + 1] - target[2 * i - 1]));
+  const proj = (x, z) => {
+    let best = null;
+    for (let i = 0; i + 1 < tn; i++) {
+      const ax = target[2 * i], az = target[2 * i + 1], dx = target[2 * i + 2] - ax, dz = target[2 * i + 3] - az, l2 = dx * dx + dz * dz;
+      const t = l2 ? Math.min(1, Math.max(0, ((x - ax) * dx + (z - az) * dz) / l2)) : 0;
+      const px = ax + dx * t, pz = az + dz * t, d = Math.hypot(px - x, pz - z);
+      if (!best || d < best.d) best = { x: px, z: pz, d, s: cum[i] + t * Math.sqrt(l2) };
+    }
+    return best;
+  };
+  const ps = [];
+  for (let i = i0; i <= i1; i++) ps.push(proj(pts[2 * i], pts[2 * i + 1]));
+  const up = ps.at(-1).s >= ps[0].s;
+  for (let k = 1; k < ps.length; k++) if ((ps[k].s >= ps[k - 1].s) !== up && ps[k].s !== ps[k - 1].s) return; // doubles back: leave it
+  const out = [], at = [];
+  ps.forEach((p, k) => {
+    at.push(out.length / 2);
+    out.push(p.x, p.z);
+    const q = ps[k + 1];
+    if (!q) return;
+    for (let j = up ? 0 : tn - 1; up ? j < tn : j >= 0; j += up ? 1 : -1) {
+      if (up ? cum[j] > p.s && cum[j] < q.s : cum[j] < p.s && cum[j] > q.s) out.push(target[2 * j], target[2 * j + 1]);
+    }
+  });
+  const delta = out.length / 2 - (i1 - i0 + 1);
+  pts.splice(2 * i0, 2 * (i1 - i0 + 1), ...out);
+  for (const p of pats) for (let k = 0; k < p[3].length; k++) {
+    const v = p[3][k];
+    if (v > i1) p[3][k] = v + delta;
+    else if (v >= i0) p[3][k] = i0 + at[v - i0];
+  }
+}
+
 export async function loadNetwork() {
   const base = import.meta.env?.BASE_URL ?? '/';
   const [net, ground] = await Promise.all([
@@ -128,11 +329,16 @@ export async function loadNetwork() {
     c.z = c.members.reduce((t, m) => t + m.z, 0) / c.members.length;
   }
 
+  // schematic shapes, made to draw as the map does (one line per trunk, lines reaching their
+  // terminals); this may splice vertices, so it updates the patterns' stop indices to match
+  const bentShapes = new Map(Object.entries(net.shapes).map(([id, raw]) => [id, Array.from(distortFlat(raw))]));
+  mapShapes(bentShapes, net.patterns, stations, net.routes);
+
   // cumulative arc length per shape, for interpolation
   const shapes = new Map();
   const rawCount = new Map(); // shape id -> vertex count before rounding (for stop indices)
-  for (const [id, raw] of Object.entries(net.shapes)) {
-    const bent = distortFlat(raw);
+  for (const [id, arr] of bentShapes) {
+    const bent = Float32Array.from(arr);
     rawCount.set(id, bent.length / 2);
     flattenFolds(bent);
     const flat = roundCorners(bent);
