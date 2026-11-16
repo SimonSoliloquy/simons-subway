@@ -86,10 +86,17 @@ function roundCorners(flat) {
 }
 
 export async function loadNetwork() {
+  const base = import.meta.env?.BASE_URL ?? '/';
   const [net, ground] = await Promise.all([
-    fetch(import.meta.env.BASE_URL + 'data/subway.json').then((r) => r.json()),
-    fetch(import.meta.env.BASE_URL + 'data/ground.json').then((r) => r.json()),
+    fetch(base + 'data/subway.json').then((r) => r.json()),
+    fetch(base + 'data/ground.json').then((r) => r.json()),
   ]);
+
+  // schematic position of every station in the data, including ones no route serves on the map
+  // (a rerouted train can still stop there)
+  const stationXY = new Map();
+  for (const [id, [, x, z]] of Object.entries(net.stations)) stationXY.set(id, distort(x, z));
+  const complexOf = new Map(Object.entries(net.stations).map(([id, s]) => [id, s[4]]));
 
   const stations = new Map();
   for (const [id, [name, x, z, routes, complex, nightRoutes, ada, adaNorth, adaSouth, adaNotes]] of Object.entries(net.stations)) {
@@ -156,7 +163,7 @@ export async function loadNetwork() {
   return {
     origin: net.origin, routes: net.routes, lines: net.lines, nightLines: net.nightLines || {},
     elevators: net.elevators || {}, meta: net.meta || {},
-    stations, complexes, shapes, patterns, byRoute, ground,
+    stations, complexes, shapes, patterns, byRoute, ground, stationXY, complexOf,
   };
 }
 
@@ -183,7 +190,22 @@ function score(p, past, future) {
   return s;
 }
 
-/** Choose the static stopping pattern that best explains a live trip's stops. */
+/** True if `stops` appear in `seq` in the same order (others may come in between: express runs). */
+function inOrder(stops, seq) {
+  let i = -1;
+  for (const s of stops) {
+    i = seq.indexOf(s, i + 1);
+    if (i < 0) return false;
+  }
+  return true;
+}
+
+/**
+ * Choose the static stopping pattern that best explains a live trip's stops. When no pattern
+ * covers the trip's whole stop list (a reroute the static data does not know, e.g. an A running
+ * via the F line and back onto 8 Av at W 4 St), the trip gets a pattern of its own whose shape
+ * is stitched from real track: see `livePattern`.
+ */
 export function matchPattern(net, trip) {
   const future = trip.stus.map((s) => s.parent);
   const past = (trip.past || []).map((s) => s.parent);
@@ -198,7 +220,143 @@ export function matchPattern(net, trip) {
     return best;
   };
   const fam = [...(net.byRoute.get(trip.route) || []), ...(net.byRoute.get(FAMILY[trip.route]) || [])];
-  return pick(fam) || pick(net.patterns); // fall back to any line (reroutes)
+  const best = pick(fam) || pick(net.patterns); // fall back to any line (reroutes)
+  if (!net.stationXY) return best;
+  // the trip's whole run (v2 feeds list the stops already made too), as far as the map knows its stations
+  const all = [];
+  for (const s of [...past, ...future]) if (net.stationXY.has(s) && all.at(-1) !== s) all.push(s);
+  if (!best) return all.length >= 2 && all.includes(future[0]) ? livePattern(net, trip, all, null) : null;
+  if (all.length < 2 || inOrder(all, best.stops)) return best;
+  // another pattern of the line (or failing that, any line) that covers the whole run
+  const fits = (cands) => cands.filter((p) => p.pos.has(future[0]) && inOrder(all, p.stops)).sort((a, b) => b.count - a.count)[0];
+  return fits(fam) || fits(net.patterns) || livePattern(net, trip, all, best) || best;
+}
+
+// ---------- patterns for live trips that no static pattern covers ----------
+// The static data has a pattern for every reroute in the supplemented feed, but the MTA also
+// reroutes trains at short notice. Such a trip is given a pattern of its own: each hop between
+// its stops is taken from the drawn track (a pattern that makes the same hop), else routed over
+// the track network (hops of all patterns, plus short walks between the platforms of a station
+// complex, which is where a train changes from one line to another: W 4 St, Jay St), so the
+// train never leaves the drawn lines. A straight line is the very last resort.
+const LIVE_CACHE_MAX = 400;
+const COMPLEX_HOP_PENALTY = 3; // a platform-to-platform link is used only where no track hop does
+
+function trackGraph(net) {
+  if (net._track) return net._track;
+  const hops = new Map();   // 'a>b' -> {shape, i0, i1, len, dt, count, err} (i1 < i0: run the shape backwards)
+  const adj = new Map();    // station -> [{to, w, hop}]
+  const edge = (a, b, w, hop) => { if (!adj.has(a)) adj.set(a, []); adj.get(a).push({ to: b, w, hop }); };
+  const gap = (shape, i, s) => { const [x, z] = net.stationXY.get(s); return Math.hypot(shape.pts[2 * i] - x, shape.pts[2 * i + 1] - z); };
+  // of the patterns making a hop: one in the same direction, whose ends sit at the stations (a few shapes
+  // have no vertex near a stop), then the busiest
+  const better = (h, cur) => !cur || (cur.rev && !h.rev) || (cur.rev === h.rev && (h.err < cur.err - 0.02 || (h.err <= cur.err + 0.02 && h.count > cur.count)));
+  for (const p of net.patterns) {
+    const shape = net.shapes.get(p.shape);
+    if (!shape) continue;
+    for (let k = 0; k + 1 < p.stops.length; k++) {
+      const a = p.stops[k], b = p.stops[k + 1], i0 = p.idx[k], i1 = p.idx[k + 1];
+      if (a === b || i1 <= i0) continue;
+      const len = shape.cum[i1] - shape.cum[i0], err = gap(shape, i0, a) + gap(shape, i1, b);
+      const fwd = { shape, i0, i1, len, dt: p.dt[k], count: p.count, err };
+      if (better(fwd, hops.get(a + '>' + b))) hops.set(a + '>' + b, fwd);
+      const back = { ...fwd, i0: i1, i1: i0, rev: true };
+      if (better(back, hops.get(b + '>' + a))) hops.set(b + '>' + a, back);
+    }
+  }
+  for (const [key, hop] of hops) { const [a, b] = key.split('>'); edge(a, b, hop.len, hop); }
+  // platforms of one station complex
+  const byComplex = new Map();
+  for (const [id, c] of net.complexOf) { if (!byComplex.has(c)) byComplex.set(c, []); byComplex.get(c).push(id); }
+  for (const ids of byComplex.values()) {
+    for (const a of ids) for (const b of ids) {
+      if (a === b || !net.stationXY.has(a) || !net.stationXY.has(b)) continue;
+      const [ax, az] = net.stationXY.get(a), [bx, bz] = net.stationXY.get(b);
+      const d = Math.hypot(bx - ax, bz - az);
+      if (d < 0.6) edge(a, b, 0.05 + COMPLEX_HOP_PENALTY * d, { link: [ax, az, bx, bz], len: d, dt: 30 });
+    }
+  }
+  net._track = { hops, adj };
+  return net._track;
+}
+
+/** Track pieces from station a to station b: the direct hop, else the shortest way over the network. */
+function routeHop(net, a, b) {
+  const { hops, adj } = trackGraph(net);
+  const direct = hops.get(a + '>' + b);
+  if (direct && !direct.rev) return [direct];
+  const [ax, az] = net.stationXY.get(a), [bx, bz] = net.stationXY.get(b);
+  const crow = Math.hypot(bx - ax, bz - az);
+  const limit = 3 * crow + 3;
+  // Dijkstra (the graph is a few hundred stations; this runs only for hops no pattern makes)
+  const dist = new Map([[a, 0]]), via = new Map(), done = new Set();
+  const open = [a];
+  while (open.length) {
+    let bi = 0;
+    for (let i = 1; i < open.length; i++) if (dist.get(open[i]) < dist.get(open[bi])) bi = i;
+    const u = open[bi];
+    open[bi] = open[open.length - 1]; open.pop();
+    if (done.has(u)) continue;
+    done.add(u);
+    if (u === b) break;
+    const du = dist.get(u);
+    if (du > limit) break;
+    for (const { to, w, hop } of adj.get(u) || []) {
+      const nd = du + w;
+      if (nd < (dist.get(to) ?? Infinity)) { dist.set(to, nd); via.set(to, { from: u, hop }); open.push(to); }
+    }
+  }
+  if (via.has(b) && dist.get(b) <= limit) {
+    const path = [];
+    for (let s = b; s !== a; s = via.get(s).from) path.push(via.get(s).hop);
+    return path.reverse();
+  }
+  if (direct) return [direct]; // only the opposite direction's hop: the same track
+  return [{ link: [ax, az, bx, bz], len: crow, dt: 90 }];
+}
+
+function livePattern(net, trip, stops, like) {
+  const cache = net._live || (net._live = new Map());
+  const key = trip.route + '|' + stops.join(' ');
+  let p = cache.get(key);
+  if (p) { cache.delete(key); cache.set(key, p); return p; } // most recently used last
+  const xs = [], zs = [], idx = [0], dt = [];
+  const put = (x, z) => {
+    if (xs.length && Math.abs(xs[xs.length - 1] - x) < 1e-6 && Math.abs(zs[zs.length - 1] - z) < 1e-6) return;
+    xs.push(x); zs.push(z);
+  };
+  const [x0, z0] = net.stationXY.get(stops[0]);
+  put(x0, z0);
+  for (let k = 0; k + 1 < stops.length; k++) {
+    let t = 0;
+    for (const piece of routeHop(net, stops[k], stops[k + 1])) {
+      t += piece.dt || 0;
+      if (piece.link) { put(piece.link[0], piece.link[1]); put(piece.link[2], piece.link[3]); continue; }
+      const { shape, i0, i1 } = piece, step = i1 > i0 ? 1 : -1;
+      for (let i = i0; i !== i1 + step; i += step) put(shape.pts[2 * i], shape.pts[2 * i + 1]);
+    }
+    dt.push(Math.max(30, Math.round(t) || 90));
+    idx.push(xs.length - 1);
+  }
+  const n = xs.length, pts = new Float32Array(2 * n), cum = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    pts[2 * i] = xs[i]; pts[2 * i + 1] = zs[i];
+    if (i) cum[i] = cum[i - 1] + Math.hypot(xs[i] - xs[i - 1], zs[i] - zs[i - 1]);
+  }
+  const dir = /\.\.S/.test(like?.shape || trip.id) ? 'S' : 'N';
+  const id = `${trip.route}..${dir}~live${(net._liveN = (net._liveN || 0) + 1)}`;
+  net.shapes.set(id, { pts, cum });
+  const pos = new Map();
+  stops.forEach((s, i) => { if (!pos.has(s)) pos.set(s, i); });
+  p = { route: trip.route, shape: id, stops, idx, dt, count: 0, night: 0, pos, live: true };
+  cache.set(key, p);
+  // forget the trips least recently seen (each live trip is matched again on every feed refresh)
+  while (cache.size > LIVE_CACHE_MAX) {
+    const [oldKey, old] = cache.entries().next().value;
+    cache.delete(oldKey);
+    net.shapes.delete(old.shape);
+  }
+  return p;
 }
 
 /** Point at fractional arc length between two shape vertex indices. Returns [x, z, heading]. */
