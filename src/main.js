@@ -137,7 +137,7 @@ const heightOf = (route) => BASE_Y + laneOf(route).slot * state.spacing;
 // 3/4) they run side by side: each trunk has a fixed slot, offset by whole line widths.
 const TRUNK_SLOT = new Map();
 for (const [ids, slot] of [[['A', 'C', 'E'], -1], [['B', 'D', 'F', 'FX', 'M'], 0], [['N', 'Q', 'R', 'W'], 1], [['G'], 1], [['J', 'Z'], 1],
-  [['L'], 0], [['GS', 'FS', 'H'], 0], [['1', '2', '3'], -0.5], [['4', '5', '6', '6X'], 0.5], [['7', '7X'], 0]]) ids.forEach((r) => TRUNK_SLOT.set(r, slot));
+  [['L'], 0], [['GS'], 1], [['FS', 'H'], 0], [['1', '2', '3'], -0.5], [['4', '5', '6', '6X'], 0.5], [['7', '7X'], 0]]) ids.forEach((r) => TRUNK_SLOT.set(r, slot));
 const slotOf = (route) => TRUNK_SLOT.get(route) ?? 0;
 const trunkOf = (route) => trunkIndex.get(route) ?? route;
 const SLOT_W = 1.96; // slot spacing in line radii (lines just touch)
@@ -151,19 +151,53 @@ function sideAt(shape, s) {
   return [-tz / l, tx / l];
 }
 // Where the MTA map sets two trunks the other way round from their usual slots, a route's slot
-// changes near a station, or along a run of stations (`near`, in order), blending over `fade` km
-// so the line shifts sideways smoothly.
+// changes near a station, along a run of stations (`near`, by name, in order), or along a route's
+// own track between two stops (`along: [route, from stop id, to stop id]`), blending over `fade`
+// km so the line shifts sideways smoothly. The 42 St shuttle has its own slot (1) so it runs beside
+// the 7 under 42 St instead of on it.
 const SLOT_OVERRIDES = [
   // Queensboro Plaza: the N/W run on the north side of the 7 (they leave north for Astoria, the
   // 7 east along Queens Blvd) and then, past Queens Plaza up to 39 Av, on the west side of the
   // E/F/M/R line that their track runs along here, instead of under the 7 and then on the E
   { routes: ['N', 'W'], near: ['Queensboro Plaza', 'Queens Plaza', '39 Av-Dutch Kills'], within: 0.3, fade: 0.4, slot: -2 },
   { routes: ['7', '7X'], near: ['Queensboro Plaza'], within: 0.5, fade: 0.4, slot: -1 },
+  // Manhattan Bridge: the N/Q use the south tracks, the B/D the north ones, so on the bridge the
+  // N/Q go on the other side of the B/D (their usual slot would put them on top of the B/D)
+  { routes: ['N', 'Q'], along: ['Q', 'Q01', 'R30'], within: 0.15, fade: 0.4, slot: -1 },
+  // Flatbush Av, Atlantic Av to Grand Army Plaza: the 2/3, 4/5 and B/Q all run under the same
+  // street, so the IRT moves over to make room: 2/3, 4/5, B, Q side by side
+  { routes: ['2', '3'], along: ['2', '235', '237'], within: 0.15, fade: 0.35, slot: -2 },
+  { routes: ['4', '5'], along: ['2', '235', '237'], within: 0.15, fade: 0.35, slot: -1 },
+  // Hoyt-Schermerhorn to Fulton St: the G runs beside the A/C, heading the other way round, so
+  // its usual slot would land on the same side as theirs
+  { routes: ['G'], along: ['G', 'A42', 'G36'], within: 0.15, fade: 0.35, slot: -1 },
 ];
 let slotZones = [];
+/** Points along `route`'s track between two of its stops (either direction), every ~0.1 km. */
+function trackBetween(route, from, to) {
+  for (const p of net.patterns) {
+    if (p.route !== route) continue;
+    const i = p.stops.indexOf(from), j = p.stops.indexOf(to);
+    if (i < 0 || j < 0) continue;
+    const sh = net.shapes.get(p.shape);
+    if (!sh) continue;
+    const [a, b] = [p.idx[Math.min(i, j)], p.idx[Math.max(i, j)]], pts = [];
+    for (let d = sh.cum[a]; d < sh.cum[b] + 0.1; d += 0.1) {
+      const [x, z] = pointAt(sh, Math.min(d, sh.cum[b]));
+      pts.push({ x, z });
+    }
+    if (pts.length > 1) return pts;
+  }
+  return null;
+}
 function resolveSlotZones() {
   const at = (name) => [...net.stations.values()].find((st) => st.name === name);
   slotZones = SLOT_OVERRIDES.map((o) => {
+    if (o.along) {
+      const pts = trackBetween(...o.along);
+      if (!pts) console.warn('slot override: no track', o.along);
+      return pts ? { ...o, routes: new Set(o.routes), pts } : null;
+    }
     const sts = o.near.map(at);
     return sts.every(Boolean) ? { ...o, routes: new Set(o.routes), pts: sts.length > 1 ? sts : [sts[0], sts[0]] } : null;
   }).filter(Boolean);
