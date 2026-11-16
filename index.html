@@ -18,9 +18,11 @@
         <h1>Simon's Subway <span>NYC Live 3D</span></h1>
         <div id="status"><span class="dot"></span><span id="status-text">Loading…</span></div>
         <div id="mode-caption" hidden></div>
+        <div id="ride-mini" hidden></div>
         <span class="toggle" aria-hidden="true"></span>
       </header>
     </summary>
+    <section id="ride" hidden></section>
     <details id="finder" class="search">
       <summary>Find a station <kbd>/</kbd></summary>
       <input id="search" type="search" placeholder="Station name" autocomplete="off" aria-label="Find a station" />
@@ -38,6 +40,8 @@
     </div>
     <p class="hint">Drag to move · right-drag to rotate and tilt · scroll to zoom · click a station for live train times · / to search</p>
   </details>
+
+  <div id="toast" role="status" aria-live="polite" hidden></div>
 
   <aside id="right" class="panel">
     <section id="details" hidden></section>

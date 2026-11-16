@@ -822,6 +822,66 @@ function arrivalGlow(trip, shape, s) {
   g.spark.material.color.copy(col).lerp(_w, 0.55);
   g.t = 0;
 }
+// My train: a gold aura and sparkles that ride with the train, for the rider and anyone with the link
+const GOLD = new THREE.Color('#d99400'), GOLD_LIGHT = new THREE.Color('#fff2b0'), GOLD_BODY = new THREE.Color('#ffc21a');
+const SPARKS = 10;
+let aura = null;
+function updateRideGlow(dt) {
+  const r = state.ride;
+  const d = r && !r.ended && state.showTrains ? drawnTrains.find((x) => x.id === r.trip) : null;
+  if (!d) { if (aura) aura.group.visible = false; return; }
+  if (!aura) {
+    if (!glowTex) { glowTex = glowTexture('glow'); sparkTex = glowTexture('spark'); ringTex = glowTexture('ring'); }
+    // The glow is drawn in the opaque pass right after the ground (custom blending keeps it see-through),
+    // so the lines and the train itself are painted over it; the sparkles twinkle on top of everything.
+    const mk = (map, color, order, under = true) => {
+      const sp = new THREE.Sprite(new THREE.SpriteMaterial(under
+        ? { map, color, transparent: false, blending: THREE.CustomBlending, blendSrc: THREE.SrcAlphaFactor, blendDst: THREE.OneMinusSrcAlphaFactor, depthWrite: false, depthTest: false, fog: false }
+        : { map, color, transparent: true, depthWrite: false, depthTest: false, fog: false }));
+      sp.renderOrder = order;
+      return sp;
+    };
+    aura = { group: new THREE.Group(), t: 0, halo: [], sparks: [] };
+    // a glow at each end and the middle so the aura follows the consist's length
+    for (let i = 0; i < 3; i++) aura.halo.push(mk(glowTex, GOLD, -2));
+    aura.ring = mk(ringTex, GOLD, -2);
+    for (let i = 0; i < SPARKS; i++) aura.sparks.push({ sp: mk(sparkTex, GOLD_LIGHT, 6, false), t: Math.random(), life: 0.7 + Math.random() * 0.6, u: Math.random(), o: [0, 0] });
+    for (const sp of [...aura.halo, aura.ring, ...aura.sparks.map((x) => x.sp)]) aura.group.add(sp);
+    scene.add(aura.group);
+  }
+  aura.group.visible = true;
+  aura.t += dt;
+  const px = state.wpp || 0.01;
+  const [hx, hy, hz] = d.head, [tx, ty, tz] = d.tail;
+  const len = Math.hypot(hx - tx, hz - tz);
+  const size = Math.max(px * 30, len * 0.5);
+  const pulse = 0.5 + 0.5 * Math.sin(aura.t * 3);
+  aura.halo.forEach((sp, i) => {
+    const u = i / 2;
+    sp.position.set(hx + (tx - hx) * u, hy + (ty - hy) * u, hz + (tz - hz) * u);
+    sp.scale.setScalar(size * (1 + 0.2 * pulse));
+    sp.material.opacity = 0.8 + 0.2 * pulse;
+  });
+  // a ring that swells out from the middle every two seconds
+  const k = (aura.t % 2) / 2;
+  aura.ring.position.copy(aura.halo[1].position);
+  aura.ring.scale.setScalar(size * (0.8 + 1.8 * k));
+  aura.ring.material.opacity = 0.9 * (1 - k) ** 1.5;
+  // sparkles twinkle at random spots along the train, each re-seeded when it fades
+  for (const s of aura.sparks) {
+    s.t += dt;
+    if (s.t >= s.life) {
+      Object.assign(s, { t: 0, life: 0.7 + Math.random() * 0.6, u: Math.random() });
+      const a = Math.random() * Math.PI * 2, rr = (0.25 + Math.random() * 0.5) * size * 0.6;
+      s.o = [Math.cos(a) * rr, Math.sin(a) * rr];
+    }
+    const f = s.t / s.life, tw = Math.sin(Math.PI * f);
+    s.sp.position.set(hx + (tx - hx) * s.u + s.o[0], hy + (ty - hy) * s.u + px * 3 + Math.abs(s.o[1]) * 0.3, hz + (tz - hz) * s.u + s.o[1]);
+    s.sp.scale.setScalar(px * 18 * (0.4 + tw));
+    s.sp.material.opacity = tw;
+    s.sp.material.rotation = s.t * 2;
+  }
+}
 function updateGlows(dt) {
   const px = state.wpp || 0.01;
   for (const g of glowPool) {
@@ -860,7 +920,7 @@ function updateTrains(dt) {
     // v2 feeds give every trip a VehiclePosition, even ones not due out for half an hour, so a
     // train counts as waiting until it has left (or is standing at) its first stop
     const waiting = pos.state === 'origin';
-    const sel = state.selected?.kind === 'train' && state.selected.id === trip.id;
+    const sel = (state.selected?.kind === 'train' && state.selected.id === trip.id) || state.ride?.trip === trip.id;
     const visible = state.showTrains && (sel || ((state.showWaiting || !waiting) && routeRuns(trip.route) && revealed(trip.route)
       && (!state.focusRoute || trip.route === state.focusRoute)));
     let v = trainView.get(trip.id);
@@ -912,6 +972,8 @@ function updateTrains(dt) {
     const shown = Math.max(1, Math.min(nCars, Math.floor(maxLen / (len * S))));
     _c.set(waiting ? 0xeef0f2 : 0xb4bac0);
     if (sel) _c.set(C.ink);
+    const mine = state.ride?.trip === trip.id && !state.ride.ended; // my train is gold
+    if (mine) _c.copy(GOLD);
     _sc.copy(_w);
     if (trip.delayed) _sc.set(0xff8a80); // the sign glows red on a delayed train
     const cars = consistCars(v, trip, len, lenK, shown);
@@ -920,7 +982,7 @@ function updateTrains(dt) {
     const carW = len * g * 0.169;
     const arrow = { len: Math.max(len * lenK * 0.6, state.wpp * 5), width: Math.max(carW * 0.85, state.wpp * 4), color: trip.delayed ? _red : _ink };
     // with the whole city on screen the arrows would only clutter the map
-    trainRenderer.add(cars, len, lenK, g, _c, trip.route, _sc, 1, far < 0.6 || sel ? arrow : null, routeColor.get(trip.route) || _grey);
+    trainRenderer.add(cars, len, lenK, g, _c, trip.route, _sc, 1, far < 0.6 || sel ? arrow : null, routeColor.get(trip.route) || _grey, mine ? GOLD_BODY : null);
     const last = cars[cars.length - 1] || v, first = cars[0] || v;
     drawnTrains.push({ id: trip.id, head: [v.x, first.y, v.z], tail: [last.x, last.y, last.z] });
   }
@@ -1173,7 +1235,7 @@ function renderDetails() {
       <div style="margin-bottom:6px">${t.assigned ? '<span class="tag">assigned</span>' : '<span class="tag">unassigned</span>'}${t.delayed ? '<span class="tag bad">delayed</span>' : ''}${stale ? '<span class="tag bad">not moving</span>' : ''}</div>
       <div class="sub" style="margin-bottom:6px">${where}${trainView.get(t.id)?.shape ? ` · est. ${Math.round(trainView.get(t.id).speed * 3600 / mapScale(trainView.get(t.id).x, trainView.get(t.id).z))} km/h` : ''}</div>
       <table>${t.stus.slice(0, 16).map((s) => `<tr class="click" data-station="${esc(s.parent)}"><td>${esc(net.stations.get(s.parent)?.name || s.stop)}${s.track ? ` <span class="tag">trk ${esc(s.track)}</span>` : ''}</td><td class="t">${mins(s.arr, now)} <span class="muted">${nyTime(s.arr).replace(/:\d\d /, ' ')}</span></td></tr>`).join('')}</table>
-      <button class="act" id="follow">${state.follow ? 'Stop following' : 'Follow train'}</button>`;
+      <div class="acts"><button class="act" id="follow">${state.follow ? 'Stop following' : 'Follow train'}</button>${state.ride?.trip === t.id ? `<span class="tag gold">my train</span>` : '<button class="act" id="ride-start">I\'m on this train</button>'}</div>`;
   }
 }
 
@@ -1229,6 +1291,7 @@ function positionBoard() {
 function onPanelClick(e) {
   if (e.target.closest('.close')) { select(null); return; }
   if (e.target.id === 'follow') { state.follow = !state.follow; renderDetails(); return; }
+  if (e.target.id === 'ride-start' && state.selected?.kind === 'train') { startRide(state.selected.id); return; }
   const tr = e.target.closest('[data-trip]');
   if (tr) { select({ kind: 'train', id: tr.dataset.trip }, { fly: true }); return; }
   const st = e.target.closest('[data-station]');
@@ -1236,6 +1299,367 @@ function onPanelClick(e) {
 }
 $('#details').addEventListener('click', onPanelClick);
 board.addEventListener('click', onPanelClick);
+
+// ---------- riding a train: "I'm on this train", a live strip map, a shared link, arrival alerts ----------
+// A ride is stored in the rides Worker (worker/, Cloudflare D1) with no accounts: the rider's page
+// keeps a random secret that lets it change the destination or end the ride, and the share link is
+// ?ride=<id>. The ride ends when the train reaches the rider's stop, reaches its last stop, or the
+// rider says they got off. Without the Worker the link falls back to ?trip=<trip id>&to=<stop>.
+const RIDES_API = import.meta.env.VITE_RIDES_API || 'https://simons-subway-rides.ai-wizards.workers.dev/rides';
+const RIDE_KEY = 'simons-subway-ride', RIDE_TTL = 4 * 3600, ROW_H = 26;
+const rideEl = $('#ride'), rideMini = $('#ride-mini'), toastEl = $('#toast');
+const stName = (id) => net.stations.get(id)?.name || id;
+const hhmm = (ts) => nyTime(ts).replace(/:\d\d /, ' ');
+const idsOf = (id) => complexOf(id)?.ids || new Set([id]);
+const END_TEXT = {
+  arrived: (s) => `Arrived at ${s}`, got_off: (s) => (s ? `Got off at ${s}` : 'Got off'), last_stop: (s) => `Reached the last stop${s ? `, ${s}` : ''}`,
+  left_feed: () => 'The train left the live feed', stopped: () => 'Ride ended', replaced: () => 'Ride ended', expired: () => 'Ride ended', missing: () => 'This ride link is not valid',
+};
+let ridePick = '';            // route chosen in the "On a train?" picker
+
+async function ridesApi(path = '', body) {
+  const res = await fetch(RIDES_API + path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : { cache: 'no-store' });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(j.error || `HTTP ${res.status}`), { status: res.status });
+  return j;
+}
+function saveRide() {
+  try {
+    if (state.ride) localStorage.setItem(RIDE_KEY, JSON.stringify({ ...state.ride, pendingFly: false }));
+    else localStorage.removeItem(RIDE_KEY);
+  } catch { /* storage blocked: the ride lasts for this page only */ }
+}
+function loadRide() {
+  const q = new URLSearchParams(location.search);
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(RIDE_KEY) || 'null'); } catch { /* none */ }
+  if (saved && Date.now() / 1000 - saved.started > RIDE_TTL) saved = null;
+  const id = q.get('ride');
+  if (id && /^[0-9a-zA-Z]{10}$/.test(id)) {
+    // the rider opening their own link keeps their secret
+    state.ride = saved?.id === id ? saved : { id, shared: true, started: Date.now() / 1000 };
+  } else if (q.get('trip')) {
+    state.ride = { trip: q.get('trip'), route: q.get('r') || '', dest: q.get('to') || '', shared: true, started: Date.now() / 1000 };
+  } else state.ride = saved;
+  if (state.ride) { state.ride.pendingFly = true; saveRide(); }
+  if ((id || q.get('trip')) && !narrow()) menuEl.open = true; // opened from a link: show the ride card
+  renderRide();
+  syncRide();
+}
+/** Pull the stored ride (destination changes, and ends seen by any page) for rides with an id. */
+async function syncRide() {
+  const r = state.ride;
+  if (!r?.id || r.ended && !r.shared) return;
+  try {
+    const s = await ridesApi('/' + r.id);
+    if (state.ride !== r) return;
+    Object.assign(r, { trip: s.trip, route: s.route, dir: s.dir, terminal: s.terminal, start: s.start_station || r.start, started: s.created_at || r.started });
+    if (r.shared) r.dest = s.dest || '';
+    if (s.status === 'ended' && !r.ended) r.ended = { reason: s.end_reason, station: s.end_station, at: s.ended_at };
+    saveRide();
+    renderRide();
+    syncRide();
+  } catch (err) {
+    if (err.status === 404 && r.shared) { r.ended = { reason: 'missing' }; renderRide(); }
+  }
+}
+async function startRide(tripId) {
+  const t = state.trips.get(tripId);
+  if (!t) return;
+  const old = state.ride;
+  if (old?.id && old.secret && !old.ended) ridesApi(`/${old.id}/end`, { reason: 'replaced', secret: old.secret }).catch(() => {});
+  const r = state.ride = { trip: tripId, route: t.route, dir: t.dir, terminal: t.stus.at(-1)?.parent || '', start: prevStop(t) || t.stus[0]?.parent || '', dest: '', shared: false, started: Date.now() / 1000 };
+  saveRide();
+  menuEl.open = true;
+  if (narrow()) select(null); // one panel at a time on phones: the ride card takes over
+  renderRide();
+  renderDetails();
+  try {
+    const { id, secret } = await ridesApi('', { trip: r.trip, route: r.route, dir: r.dir, terminal: r.terminal || undefined, start: r.start || undefined, dest: r.dest || undefined });
+    Object.assign(r, { id, secret });
+    if (r.dest) ridesApi('/' + id, { secret, dest: r.dest }).catch(() => {});
+    saveRide();
+  } catch (err) { console.warn('ride not stored; sharing by trip link', err); }
+}
+function endRide(reason, station = '') {
+  const r = state.ride;
+  if (!r || r.ended) return;
+  r.ended = { reason, station, at: Date.now() / 1000 };
+  saveRide();
+  renderRide();
+  if (r.id && (r.secret || !['got_off', 'stopped'].includes(reason))) {
+    ridesApi(`/${r.id}/end`, { reason, station: station || undefined, secret: r.secret }).catch((err) => console.warn('ride end not stored', err));
+  }
+}
+function clearRide() {
+  const r = state.ride;
+  if (r && !r.ended && !r.shared) endRide('stopped');
+  state.ride = null;
+  saveRide();
+  if (/[?&](ride|trip)=/.test(location.search)) history.replaceState(null, '', location.pathname);
+  renderRide();
+  renderDetails();
+}
+function setRideDest(dest) {
+  const r = state.ride;
+  Object.assign(r, { dest, near: false, arrived: false });
+  saveRide();
+  renderRide();
+  if (r.id && r.secret) ridesApi('/' + r.id, { secret: r.secret, dest: dest || null }).catch((err) => console.warn('destination not stored', err));
+  if (dest) enableAlerts();
+}
+const rideUrl = (r) => {
+  const q = new URLSearchParams();
+  if (r.id) q.set('ride', r.id);
+  else { q.set('trip', r.trip); if (r.route) q.set('r', r.route); if (r.dest) q.set('to', r.dest); }
+  return `${location.origin}${location.pathname}?${q}`;
+};
+
+/** Where the ride stands: phase 'wait' | 'riding' | 'near' | 'arrived' | 'last' | 'gone'. */
+function rideStatus(r, now = Date.now() / 1000) {
+  const t = r.trip && state.trips.get(r.trip);
+  const name = (id) => `<b>${esc(stName(id))}</b>`;
+  if (!t) {
+    if (!state.feedTime || !r.trip) return { phase: 'wait', html: 'Waiting for live data…' };
+    if (r.dest && r.arrived) return { phase: 'arrived', html: `Arrived at ${name(r.dest)}` };
+    // gone from the feed: a train that was at or approaching its last stop has finished its trip
+    if (r.lastLeft != null && r.lastLeft <= 1) {
+      if (r.dest && r.terminal && idsOf(r.dest).has(r.terminal)) return { phase: 'arrived', html: `Arrived at ${name(r.dest)}` };
+      return { phase: 'last', html: `Reached the last stop${r.terminal ? `, ${name(r.terminal)}` : ''}` };
+    }
+    return { phase: 'gone', html: 'This train has left the live feed.' };
+  }
+  const where = trainWhere(t) || (t.stus[0] ? `Next stop ${name(t.stus[0].parent)}` : '');
+  const pos = trainView.get(t.id)?.pos;
+  const at = (s) => s.arr <= now + 20 || (pos?.state === 'stopped' && pos.to === s.parent);
+  if (r.dest) {
+    const ids = idsOf(r.dest);
+    const i = t.stus.findIndex((s) => ids.has(s.parent));
+    if (i < 0) {
+      if (r.arrived || (t.past || []).some((s) => ids.has(s.parent))) return { phase: 'arrived', html: `Arrived at ${name(r.dest)}` };
+      return { phase: 'riding', html: `${where}<br><span class="bad">This train is no longer scheduled to stop at ${name(r.dest)}.</span>` };
+    }
+    const s = t.stus[i];
+    if (i === 0 && at(s)) return { phase: 'arrived', html: `Arrived at ${name(r.dest)}` };
+    const eta = `${mins(s.arr, now)} · ${hhmm(s.arr)}`;
+    if (i === 0) return { phase: 'near', html: `Next stop ${name(r.dest)} · ${eta}` };
+    return { phase: 'riding', html: `${where}<br>${name(r.dest)} in ${eta} · ${i + 1} stops` };
+  }
+  if (t.stus.length === 1 && at(t.stus[0])) return { phase: 'last', html: `Reached the last stop, ${name(t.stus[0].parent)}` };
+  const last = t.stus.at(-1);
+  return { phase: 'riding', html: `${where}${last ? `<br>Last stop ${name(last.parent)} · ${hhmm(last.arr)}` : ''}` };
+}
+
+/** The strip map: the stop behind the train, then each stop up to the rider's (long runs folded). */
+function stripHtml(r, t) {
+  const color = net.routes[t.route]?.color || '#111';
+  const prev = prevStop(t);
+  let end = r.dest ? t.stus.findIndex((s) => idsOf(r.dest).has(s.parent)) : t.stus.length - 1;
+  if (end < 0) end = Math.min(t.stus.length - 1, 5);
+  const list = t.stus.slice(0, end + 1);
+  const shown = list.length > 6 ? [...list.slice(0, 3), { more: list.length - 5 }, ...list.slice(-2)] : list;
+  const rows = (prev ? [{ parent: prev, past: true }] : []).concat(shown);
+  const now = Date.now() / 1000;
+  return `<div class="strip" style="--line:${color}" data-at="${esc((prev || '') + '>' + (t.stus[0]?.parent || ''))}">${rows.map((s, k) => s.more
+    ? `<div class="srow more"><span class="sdot"></span><span class="sname">${s.more} more stops</span></div>`
+    : `<div class="srow${s.past ? ' past' : ''}${k === rows.length - 1 && r.dest ? ' dest' : ''}"><span class="sdot"></span><span class="sname">${esc(stName(s.parent))}</span><span class="stime">${s.past ? '' : mins(s.arr, now)}</span></div>`).join('')}
+    <span class="strain" style="background:${color}"></span></div>`;
+}
+/** The stop behind the train: the feed's last stop made, else the one the map has it leaving. */
+const prevStop = (t) => t.past?.at(-1)?.parent || trainView.get(t.id)?.pos?.from || null;
+/** Slide the train along the strip, every frame: between the stop behind it (row 0) and the next. */
+function animateRide() {
+  const r = state.ride;
+  const mark = r && !rideEl.hidden && rideEl.querySelector('.strain');
+  if (!mark) return;
+  const t = state.trips.get(r.trip), v = trainView.get(r.trip), pos = v?.pos;
+  if (!t) return;
+  // the train has passed a stop since the strip was drawn: redraw it
+  const at = (prevStop(t) || '') + '>' + (t.stus[0]?.parent || '');
+  if (mark.parentElement.dataset.at !== at && document.activeElement?.id !== 'ride-dest') { renderRide(); return; }
+  let k = 0;
+  if (prevStop(t)) {
+    k = 1;
+    if (pos?.state === 'moving') {
+      k = pos.sNext > pos.sPrev && v.s !== undefined ? (v.s - pos.sPrev) / (pos.sNext - pos.sPrev) : pos.frac ?? 0.5;
+      k = Math.max(0.05, Math.min(1, k));
+    }
+  }
+  mark.style.transform = `translateY(${(k * ROW_H).toFixed(1)}px)`;
+}
+
+function routePicker() {
+  const order = Object.values(MAP_COLORS).flat();
+  const running = new Set([...state.trips.values()].map((t) => t.route));
+  const routes = order.filter((x) => running.has(x) && net.routes[x]);
+  let list = '';
+  if (ridePick) {
+    const now = Date.now() / 1000;
+    const trips = [...state.trips.values()].filter((t) => t.route === ridePick && t.stus.length > 1 && placeTrip(net, t, now)?.state !== 'origin');
+    const group = (d) => trips.filter((t) => t.dir === d).map((t) => `<button class="rtrain" data-ride-trip="${esc(t.id)}"><b>to ${esc(destName(t))}</b><span>${trainWhere(t) || 'Next stop ' + esc(stName(t.stus[0]?.parent))}</span></button>`).join('');
+    list = `<div class="dir">${DIR_LABEL.N}</div>${group('N') || '<div class="sub">None running</div>'}<div class="dir">${DIR_LABEL.S}</div>${group('S') || '<div class="sub">None running</div>'}`;
+  }
+  return `<div class="dir rtitle">On a train?</div>
+    <div class="rroutes">${routes.map((x) => `<button class="rpick${x === ridePick ? ' on' : ''}" data-ride-route="${esc(x)}" aria-label="${esc(x)} train">${bullet(x, 'sm')}</button>`).join('')}</div>
+    <div class="sub">${ridePick ? 'Which one are you on?' : 'Pick your line, or tap your train on the map.'}</div>
+    <div class="rlist">${list}</div>`;
+}
+
+function renderRide() {
+  if (!net) return;
+  const r = state.ride;
+  rideEl.hidden = false;
+  if (!r) { rideEl.className = 'picker'; rideEl.innerHTML = routePicker(); rideMini.hidden = true; return; }
+  const sel = rideEl.querySelector('#ride-dest');
+  if (sel && document.activeElement === sel) { updateRide(); return; }
+  rideEl.className = '';
+  const t = r.trip && state.trips.get(r.trip);
+  if (t) { r.route = t.route; r.dir = t.dir; r.terminal = t.stus.at(-1)?.parent || r.terminal; r.lastLeft = t.stus.length; }
+  const title = 'My train';
+  const head = `<div class="head">${r.route ? bullet(r.route) : ''}<div><h3>${title}</h3><div class="sub">${t ? `to ${esc(destName(t))} · ${t.dir === 'N' ? 'Northbound' : 'Southbound'}` : r.terminal ? `to ${esc(stName(r.terminal))}` : ''}</div></div><button class="close" id="ride-close" aria-label="${r.shared ? 'Stop tracking' : 'End ride'}">×</button></div>`;
+  if (r.ended) {
+    const e = r.ended, text = (END_TEXT[e.reason] || END_TEXT.expired)(e.station ? stName(e.station) : '');
+    // the link stays up: an ended ride reads as a previous ride
+    const to = e.station || r.dest;
+    const day = r.started ? new Date(r.started * 1000).toLocaleDateString('en-US', { timeZone: 'America/New_York', weekday: 'short', month: 'short', day: 'numeric' }) : '';
+    const when = [day, r.started ? hhmm(r.started) + (e.at ? ' – ' + hhmm(e.at) : '') : ''].filter(Boolean).join(' · ');
+    rideEl.className = 'previous';
+    rideEl.innerHTML = `${head}<div class="ptag">Previous ride</div>
+      ${r.start || to ? `<div class="proute">${r.start ? esc(stName(r.start)) : '…'} <span>→</span> ${to ? esc(stName(to)) : '…'}</div>` : ''}
+      ${when ? `<div class="sub">${esc(when)}</div>` : ''}
+      <div id="ride-status" class="arrived">${esc(text)}</div>
+      <div class="acts">${r.id && e.reason !== 'missing' ? '<button class="act ghost" id="ride-share">Share tracker</button>' : ''}<button class="act" id="ride-done">${r.shared ? 'Close' : 'Done'}</button></div>`;
+    updateMini();
+    return;
+  }
+  const now = Date.now() / 1000;
+  const stops = t ? t.stus.filter((s, i) => i > 0 || s.arr > now + 20) : [];
+  const opts = stops.map((s) => `<option value="${esc(s.parent)}"${s.parent === r.dest ? ' selected' : ''}>${esc(stName(s.parent))} · ${hhmm(s.arr)}</option>`);
+  if (r.dest && !stops.some((s) => s.parent === r.dest)) opts.unshift(`<option value="${esc(r.dest)}" selected>${esc(stName(r.dest))}</option>`);
+  const destBlock = r.shared
+    ? (r.dest ? `<div class="sub ride-dest-ro">Getting off at <b>${esc(stName(r.dest))}</b></div>` : '')
+    : `<label class="ride-dest">Getting off at <select id="ride-dest"${t ? '' : ' disabled'}><option value="">No stop chosen</option>${opts.join('')}</select></label>`;
+  rideEl.innerHTML = `${head}
+    <div id="ride-status"></div>
+    ${t ? stripHtml(r, t) : ''}
+    ${destBlock}
+    <div id="ride-alerts" class="sub"></div>
+    <div class="acts"><button class="act" id="ride-share">Share tracker</button><button class="act ghost" id="ride-show"${t ? '' : ' disabled'}>Show train</button>${r.shared ? '' : `<button class="act ghost" id="ride-off"${t ? '' : ' disabled'}>I got off</button>`}</div>`;
+  updateRide();
+  animateRide();
+}
+
+function updateMini() {
+  const r = state.ride;
+  if (!r || menuEl.open) { rideMini.hidden = true; return; }
+  const st = r.ended ? null : rideStatus(r);
+  const t = state.trips.get(r.trip);
+  const text = r.ended ? (END_TEXT[r.ended.reason] || END_TEXT.expired)(r.ended.station ? stName(r.ended.station) : '')
+    : st.phase === 'near' || st.phase === 'arrived' ? st.html.replace(/<[^>]+>/g, '')
+    : r.dest && t ? `${stName(r.dest)} in ${mins(t.stus.find((s) => idsOf(r.dest).has(s.parent))?.arr || 0, Date.now() / 1000)}`
+    : t?.stus[0] ? `Next stop ${stName(t.stus[0].parent)}` : st.html.replace(/<[^>]+>/g, '');
+  rideMini.innerHTML = `${r.route ? bullet(r.route, 'sm') : ''}<span>${esc(text)}</span>`;
+  rideMini.hidden = false;
+}
+
+/** Once a second and on every feed refresh: status text, alerts, and ending the ride. */
+function updateRide() {
+  const r = state.ride;
+  if (!r) return;
+  updateMini();
+  if (r.ended) return;
+  // opened from a link or a reload: fly to the train once it is on the map, and follow it
+  if (r.pendingFly && trainView.has(r.trip)) { r.pendingFly = false; select({ kind: 'train', id: r.trip }, { fly: true }); }
+  const st = rideStatus(r);
+  const box = rideEl.querySelector('#ride-status');
+  if (box) { box.innerHTML = st.html; box.className = st.phase; }
+  const al = rideEl.querySelector('#ride-alerts');
+  if (al) al.innerHTML = alertsHtml(r);
+  const route = r.route ? `${r.route} train` : 'Train';
+  if (r.dest && st.phase === 'near' && !r.near) {
+    r.near = true; saveRide();
+    notify(`Next stop: ${stName(r.dest)}`, `${route} · arriving in ${mins(state.trips.get(r.trip)?.stus[0]?.arr || 0, Date.now() / 1000)}`);
+  }
+  if (r.dest && st.phase === 'arrived') {
+    if (!r.arrived) { r.arrived = r.near = true; notify(`Arrived at ${stName(r.dest)}`, `${route} has reached ${stName(r.dest)}.`); }
+    endRide('arrived', r.dest);
+  } else if (st.phase === 'last') {
+    endRide('last_stop', r.terminal);
+  } else if (st.phase === 'gone') {
+    endRide('left_feed');
+  }
+}
+function alertsHtml(r) {
+  if (!r.dest) return r.shared ? '' : 'Choose your stop to get an alert as the train arrives.';
+  if (!('Notification' in window)) return 'Arrival alerts show on this page while it is open. (On iPhone, add the site to your Home Screen for system alerts.)';
+  if (Notification.permission === 'granted') return 'Alerts at the stop before and on arrival, while this page is open.';
+  if (Notification.permission === 'denied') return 'Notifications are blocked for this site, so alerts show on this page only.';
+  return '<button class="link" id="ride-allow">Turn on arrival notifications</button>';
+}
+
+async function enableAlerts() {
+  if (!('Notification' in window)) return;
+  try {
+    if (Notification.permission === 'default') await Notification.requestPermission();
+    if (Notification.permission === 'granted' && 'serviceWorker' in navigator) await navigator.serviceWorker.register('/sw.js');
+  } catch (err) { console.warn('notifications unavailable', err); }
+  updateRide();
+}
+async function notify(title, body) {
+  toast(`<b>${esc(title)}</b><br>${esc(body)}`);
+  try { navigator.vibrate?.([200, 100, 200]); } catch { /* no vibration */ }
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  try {
+    // Android Chrome only shows notifications through a service worker
+    const reg = 'serviceWorker' in navigator && await navigator.serviceWorker.getRegistration();
+    if (reg) await reg.showNotification(title, { body, tag: 'ride', renotify: true });
+    else new Notification(title, { body, tag: 'ride' });
+  } catch (err) { console.warn('notification failed', err); }
+}
+let toastTimer = 0;
+function toast(html) {
+  toastEl.innerHTML = html;
+  toastEl.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.hidden = true; }, 12_000);
+}
+toastEl.addEventListener('click', (e) => { if (e.target.tagName !== 'INPUT') toastEl.hidden = true; });
+
+async function shareRide(btn) {
+  const r = state.ride, t = state.trips.get(r.trip);
+  const url = rideUrl(r);
+  const s = t && r.dest ? t.stus.find((x) => idsOf(r.dest).has(x.parent)) : null;
+  const text = r.ended ? `My ${r.route ? r.route + ' ' : ''}train ride${r.start && (r.ended.station || r.dest) ? `, ${stName(r.start)} to ${stName(r.ended.station || r.dest)}` : ''}.` : `Track my ${r.route ? r.route + ' ' : ''}train live${t ? ` (to ${destName(t)})` : ''}${r.dest ? `, getting off at ${stName(r.dest)}${s ? ` around ${hhmm(s.arr)}` : ''}` : ''}.`;
+  if (navigator.share) {
+    try { await navigator.share({ title: "Simon's Subway", text, url }); return; } catch (err) { if (err.name === 'AbortError') return; }
+  }
+  try {
+    await navigator.clipboard.writeText(`${text} ${url}`);
+    btn.textContent = 'Link copied';
+    setTimeout(() => { btn.textContent = 'Share tracker'; }, 2500);
+  } catch {
+    toast(`Copy this link to share the train:<br><input class="copy" readonly value="${esc(url)}">`);
+    toastEl.querySelector('input').select();
+  }
+}
+function gotOff() {
+  const t = state.trips.get(state.ride.trip), pos = trainView.get(state.ride.trip)?.pos;
+  const station = pos?.state === 'stopped' ? pos.to : t?.past?.at(-1)?.parent || t?.stus[0]?.parent || '';
+  endRide('got_off', station);
+}
+rideEl.addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  if (b.dataset.rideRoute) { ridePick = ridePick === b.dataset.rideRoute ? '' : b.dataset.rideRoute; renderRide(); return; }
+  if (b.dataset.rideTrip) { ridePick = ''; startRide(b.dataset.rideTrip); return; }
+  if (b.id === 'ride-close' || b.id === 'ride-done') clearRide();
+  else if (b.id === 'ride-share') shareRide(b);
+  else if (b.id === 'ride-show') { if (narrow()) menuEl.open = false; select({ kind: 'train', id: state.ride.trip }, { fly: true }); }
+  else if (b.id === 'ride-off') gotOff();
+  else if (b.id === 'ride-allow') enableAlerts();
+});
+rideEl.addEventListener('change', (e) => { if (e.target.id === 'ride-dest') setRideDest(e.target.value); });
+menuEl.addEventListener('toggle', updateMini);
 
 // ---------- camera flights ----------
 let flight = null;
@@ -1495,6 +1919,8 @@ async function refreshTrips() {
     renderDetails();
     renderBoard();
     updatePath();
+    renderRide();
+    syncRide();
   } catch (err) {
     console.error(err);
     setStatus('Realtime feeds unavailable: ' + err.message, 'error');
@@ -1561,6 +1987,7 @@ function frame() {
   updateZoom();
   updateTrains(dt);
   updateGlows(dt);
+  updateRideGlow(dt);
   if (state.follow && !flight && state.selected?.kind === 'train') {
     const v = trainView.get(state.selected.id);
     if (v) {
@@ -1575,12 +2002,14 @@ function frame() {
   updateHover();
   updateMarker();
   positionBoard();
+  animateRide();
   renderer.render(scene, camera);
   requestAnimationFrame(frame);
 }
 // text that ticks: countdowns and data age, once a second (also runs while rAF is paused)
 function tick() {
   renderLiveStatus();
+  updateRide();
   renderDetails();
   renderBoard();
 }
@@ -1600,6 +2029,7 @@ async function start() {
   buildSearch();
   setNight(state.night);
   setAda(state.ada);
+  loadRide();
   // open on the whole network as the printed map: overhead, flat, rotated like the MTA map
   computeHome();
   controls.target.copy(HOME.target);
@@ -1609,7 +2039,7 @@ async function start() {
   if (import.meta.env.DEV) {
     window.__subway = {
       state, trainView, get trains() { return trainRenderer; }, get drawn() { return drawnTrains; }, get glows() { return glowPool; }, get crossings() { return crossings; }, camera, controls, net, select, setNight, setAda, goHome,
-      step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); updateGlows(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
+      step(dt = 0.05) { updateFlight(); updateZoom(); updateTrains(dt); updateGlows(dt); updateRideGlow(dt); tuneDamping(); controls.update(); updateLabels(); updateMarker(); renderBoard(); positionBoard(); renderer.render(scene, camera); },
     };
   }
   frame();

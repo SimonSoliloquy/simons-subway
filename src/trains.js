@@ -105,6 +105,8 @@ function chevronGeometry() {
   return new THREE.ShapeGeometry(sh).rotateX(-Math.PI / 2);
 }
 
+const WHITE = new THREE.Color(1, 1, 1);
+
 export class TrainRenderer {
   /** routeInfo(route) -> {label, color, text, express} for the front-window sign. */
   constructor(scene, routeInfo) {
@@ -180,12 +182,13 @@ export class TrainRenderer {
    *  route: for the front sign; tint: sign tint (white, or red when delayed);
    *  arrow: {len, width, color} of the direction chevron on the lead cars' roof (km);
    *  stripe: route colour for the side and roof stripe. */
-  add(cars, len, lenK, girth, color, route, tint, tall = 1, arrow = null, stripe = null) {
+  add(cars, len, lenK, girth, color, route, tint, tall = 1, arrow = null, stripe = null, body = null) {
     for (let i = 0; i < cars.length && this.nc < MAX_CARS; i++) {
       const c = cars[i];
       this._q.setFromAxisAngle(this._up, -c.h);
       this._m.compose(this._p.set(c.x, c.y, c.z), this._q, this._s.set(len * lenK, len * girth * tall, len * girth));
       this.body.setMatrixAt(this.nc, this._m);
+      this.body.setColorAt(this.nc, body || WHITE); // white leaves the stainless as it is; gold for my train
       this.roof.setMatrixAt(this.nc, this._m);
       this.roof.setColorAt(this.nc, color);
       this.stripe.setMatrixAt(this.nc, this._m);

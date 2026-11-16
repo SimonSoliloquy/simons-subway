@@ -65,3 +65,25 @@ Track and stations are at true positions. Lines and trains are drawn as symbols 
 zoom: up close the cars are true length, and at city scale they are enlarged and parallel services
 touch like the bands on the printed map. Same-trunk services (A/C/E, B/D/F/M…) are offset side by side, and the
 "Layer height" slider can also stack them vertically.
+
+## Rides
+
+Tap a train and choose **I'm on this train**, or pick your line under **On a train?** in the menu.
+The ride card shows a live strip map of the stops to your stop, takes an optional stop to get off at
+(alerts at the stop before and on arrival, while the page is open), and **Share tracker** sends a
+link (`?ride=<id>`) that opens the same train for anyone.
+
+Rides are kept by a small Cloudflare Worker in `worker/` (`simons-subway-rides`) in the shared
+`leaderboards` D1 database, table `subway_rides`, with its own migrations table so it never touches
+the games' tables or migration history. No accounts: the rider's page holds a random secret (only its
+hash is stored) that lets it change the stop or end the ride. The ride's train glows gold on the map
+for the rider and for anyone who opens the link. A ride ends when the train reaches the
+rider's stop, reaches its last stop, leaves the feed, or the rider taps **I got off**; any page
+watching the ride can report the first three. Open rides end on their own after 4 hours. Rows are
+kept, so a link keeps working and shows the previous ride after it ends. If the Worker is unreachable, sharing falls back to `?trip=<trip id>&to=<stop>`.
+
+    cd worker
+    npx wrangler d1 migrations apply leaderboards --remote   # create the table
+    npx wrangler deploy
+    # local: npx wrangler d1 migrations apply leaderboards --local && npx wrangler dev --port 18797,
+    # then run the site with VITE_RIDES_API=http://localhost:18797/rides

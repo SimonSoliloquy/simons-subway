@@ -9,3 +9,5 @@ raw/*
 !raw/mta-gtfs-rt-reference.pdf
 .vercel
 .env*
+
+worker/.wrangler/
