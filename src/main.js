@@ -1236,7 +1236,7 @@ function renderDetails() {
       <div style="margin-bottom:6px">${t.assigned ? '<span class="tag">assigned</span>' : '<span class="tag">unassigned</span>'}${t.delayed ? '<span class="tag bad">delayed</span>' : ''}${stale ? '<span class="tag bad">not moving</span>' : ''}</div>
       <div class="sub" style="margin-bottom:6px">${where}${trainView.get(t.id)?.shape ? ` · est. ${Math.round(trainView.get(t.id).speed * 3600 / mapScale(trainView.get(t.id).x, trainView.get(t.id).z))} km/h` : ''}</div>
       <table>${t.stus.slice(0, 16).map((s) => `<tr class="click" data-station="${esc(s.parent)}"><td>${esc(net.stations.get(s.parent)?.name || s.stop)}${s.track ? ` <span class="tag">trk ${esc(s.track)}</span>` : ''}</td><td class="t">${mins(s.arr, now)} <span class="muted">${nyTime(s.arr).replace(/:\d\d /, ' ')}</span></td></tr>`).join('')}</table>
-      <div class="acts"><button class="act" id="follow">${state.follow ? 'Stop following' : 'Follow train'}</button>${state.ride?.trip === t.id ? `<span class="tag gold">my train</span>` : '<button class="act" id="ride-start">I\'m on this train</button>'}</div>`;
+      <div class="acts"><button class="act" id="follow">${state.follow ? 'Stop following' : 'Follow train'}</button>${!RIDES_ON ? '' : state.ride?.trip === t.id ? `<span class="tag gold">my train</span>` : '<button class="act" id="ride-start">I\'m on this train</button>'}</div>`;
   }
 }
 
@@ -1306,6 +1306,9 @@ board.addEventListener('click', onPanelClick);
 // keeps a random secret that lets it change the destination or end the ride, and the share link is
 // ?ride=<id>. The ride ends when the train reaches the rider's stop, reaches its last stop, or the
 // rider says they got off. Without the Worker the link falls back to ?trip=<trip id>&to=<stop>.
+// Ride tracking is built but not released: it stays off (no card, no button, no Worker calls)
+// unless the build sets VITE_RIDES=on, e.g. `VITE_RIDES=on npm run dev`.
+const RIDES_ON = import.meta.env.VITE_RIDES === 'on';
 const RIDES_API = import.meta.env.VITE_RIDES_API || 'https://simons-subway-rides.ai-wizards.workers.dev/rides';
 const RIDE_KEY = 'simons-subway-ride', RIDE_TTL = 4 * 3600, ROW_H = 26;
 const rideEl = $('#ride'), rideMini = $('#ride-mini'), toastEl = $('#toast');
@@ -1359,6 +1362,7 @@ function saveRide() {
   } catch { /* storage blocked: the ride lasts for this page only */ }
 }
 function loadRide() {
+  if (!RIDES_ON) return;
   const q = new URLSearchParams(location.search);
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem(RIDE_KEY) || 'null'); } catch { /* none */ }
@@ -1398,6 +1402,7 @@ async function syncRide() {
   }
 }
 async function startRide(tripId) {
+  if (!RIDES_ON) return;
   const t = state.trips.get(tripId);
   if (!t) return;
   const old = state.ride;
@@ -1540,6 +1545,7 @@ function routePicker() {
 }
 
 function renderRide() {
+  if (!RIDES_ON) return;
   if (!net) return;
   const r = state.ride;
   rideEl.hidden = false;

@@ -50,3 +50,8 @@ test('no ride function calls the Worker from a timer or the frame loop', () => {
     assert.ok(!/ridesApi\(|syncRide\(/.test(b), `${fn} must not call the Worker`);
   }
 });
+
+test('ride tracking ships switched off', () => {
+  assert.match(main, /const RIDES_ON = import\.meta\.env\.VITE_RIDES === 'on';/);
+  for (const fn of ['loadRide', 'startRide', 'renderRide']) assert.ok(body(fn).includes('if (!RIDES_ON) return;'), `${fn} must check RIDES_ON`);
+});

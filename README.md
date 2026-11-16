@@ -68,6 +68,10 @@ touch like the bands on the printed map. Same-trunk services (A/C/E, B/D/F/M…)
 
 ## Rides
 
+**Not released yet:** ride tracking is built and switched off. Nothing of it shows and the site
+makes no calls to the rides Worker unless the build sets `VITE_RIDES=on` (try it locally with
+`VITE_RIDES=on npm run dev`).
+
 Tap a train and choose **I'm on this train**, or pick your line under **On a train?** in the menu.
 The ride card shows a live strip map of the stops to your stop, takes an optional stop to get off at
 (alerts at the stop before and on arrival, while the page is open), and **Share tracker** sends a
