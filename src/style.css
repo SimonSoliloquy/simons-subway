@@ -307,3 +307,11 @@ body:has(#service[open]) #disclaimer, body:has(#details:not([hidden])) #disclaim
 @keyframes ride-gold { 50% { box-shadow: 0 0 0 6px rgba(242,183,5,0); } }
 #ride .strain { box-shadow: 0 0 0 1px #111, 0 0 10px 3px rgba(242,183,5,.85); }
 #ride .strain::after { border-color: #f2b705; }
+
+/* iPhone notch / Dynamic Island and home bar (viewport-fit=cover; also the store apps) */
+@media (max-width: 760px) {
+  #left { top: calc(8px + env(safe-area-inset-top, 0px)); max-height: calc(100% - 140px - env(safe-area-inset-top, 0px)); }
+  #right { bottom: calc(30px + env(safe-area-inset-bottom, 0px)); }
+  #disclaimer, body:has(#left[open]) #disclaimer, body:has(#service[open]) #disclaimer, body:has(#details:not([hidden])) #disclaimer { padding-bottom: calc(3px + env(safe-area-inset-bottom, 0px)); }
+  #toast { top: calc(70px + env(safe-area-inset-top, 0px)); }
+}
