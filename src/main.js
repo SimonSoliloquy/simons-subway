@@ -1305,10 +1305,11 @@ function renderDetails() {
     const stale = t.vehicle?.ts && state.feedTime - t.vehicle.ts > 90;
     el.innerHTML = `
       <div class="head">${bullet(t.route)}<div><h3>to ${esc(destName(t))}</h3><div class="sub">${t.dir === 'N' ? 'Northbound' : 'Southbound'} · ${esc(t.trainId || t.id)}</div></div><button class="close" aria-label="Close">×</button></div>
+      ${!RIDES_ON ? '' : state.ride?.trip === t.id ? '<div class="ride-here acts"><span class="tag gold">my train</span><button class="act ghost" id="ride-send">Send link</button></div>' : '<div class="ride-here acts"><button class="act gold" id="ride-start">I\'m on this train</button><button class="act ghost" id="ride-send">Send link</button></div>'}
       <div style="margin-bottom:6px">${t.assigned ? '<span class="tag">assigned</span>' : '<span class="tag">unassigned</span>'}${t.delayed ? '<span class="tag bad">delayed</span>' : ''}${stale ? '<span class="tag bad">not moving</span>' : ''}</div>
       <div class="sub" style="margin-bottom:6px">${where}${trainView.get(t.id)?.shape ? ` · est. ${Math.round(trainView.get(t.id).speed * 3600 / mapScale(trainView.get(t.id).x, trainView.get(t.id).z))} km/h` : ''}</div>
       <table>${t.stus.slice(0, 16).map((s) => `<tr class="click" data-station="${esc(s.parent)}"><td>${esc(net.stations.get(s.parent)?.name || s.stop)}${s.track ? ` <span class="tag">trk ${esc(s.track)}</span>` : ''}</td><td class="t">${mins(s.arr, now)} <span class="muted">${nyTime(s.arr).replace(/:\d\d /, ' ')}</span></td></tr>`).join('')}</table>
-      <div class="acts"><button class="act" id="follow">${state.follow ? 'Stop following' : 'Follow train'}</button>${!RIDES_ON ? '' : state.ride?.trip === t.id ? `<span class="tag gold">my train</span>` : '<button class="act" id="ride-start">I\'m on this train</button>'}</div>`;
+      <div class="acts"><button class="act" id="follow">${state.follow ? 'Stop following' : 'Follow train'}</button></div>`;
   }
 }
 
@@ -1365,6 +1366,7 @@ function onPanelClick(e) {
   if (e.target.closest('.close')) { select(null); return; }
   if (e.target.id === 'follow') { state.follow = !state.follow; renderDetails(); return; }
   if (e.target.id === 'ride-start' && state.selected?.kind === 'train') { startRide(state.selected.id); return; }
+  if (e.target.id === 'ride-send' && state.selected?.kind === 'train') { shareTrain(e.target, state.selected.id); return; }
   const tr = e.target.closest('[data-trip]');
   if (tr) { select({ kind: 'train', id: tr.dataset.trip }, { fly: true }); return; }
   const st = e.target.closest('[data-station]');
@@ -1621,7 +1623,7 @@ function renderRide() {
   if (!net) return;
   const r = state.ride;
   rideEl.hidden = false;
-  if (!r) { rideEl.className = 'picker'; rideEl.innerHTML = routePicker(); rideMini.hidden = true; return; }
+  if (!r) { rideEl.className = 'picker'; rideEl.innerHTML = routePicker(); updateMini(); return; }
   const sel = rideEl.querySelector('#ride-dest');
   if (sel && document.activeElement === sel) { updateRide(); return; }
   rideEl.className = '';
@@ -1663,7 +1665,8 @@ function renderRide() {
 
 function updateMini() {
   const r = state.ride;
-  if (!r || menuEl.open) { rideMini.hidden = true; return; }
+  if (!RIDES_ON || menuEl.open) { rideMini.hidden = true; return; }
+  if (!r) { rideMini.innerHTML = '<span class="ride-invite">I\'m on a train</span>'; rideMini.hidden = false; return; }
   const st = r.ended ? null : rideStatus(r);
   const t = state.trips.get(r.trip);
   const text = r.ended ? (END_TEXT[r.ended.reason] || END_TEXT.expired)(r.ended.station ? stName(r.ended.station) : '')
@@ -1742,13 +1745,25 @@ async function shareRide(btn) {
   const url = rideUrl(r);
   const s = t && r.dest ? t.stus.find((x) => idsOf(r.dest).has(x.parent)) : null;
   const text = r.ended ? `My ${r.route ? r.route + ' ' : ''}train ride${r.start && (r.ended.station || r.dest) ? `, ${stName(r.start)} to ${stName(r.ended.station || r.dest)}` : ''}.` : `Track my ${r.route ? r.route + ' ' : ''}train live${t ? ` (to ${destName(t)})` : ''}${r.dest ? `, getting off at ${stName(r.dest)}${s ? ` around ${hhmm(s.arr)}` : ''}` : ''}.`;
+  return shareLink(btn, text, url);
+}
+/** A link to one train that anyone can open: costs no Worker request (the train is in the link). */
+function shareTrain(btn, tripId) {
+  const r = state.ride;
+  if (r?.trip === tripId && !r.ended) return shareRide(btn); // my train: send my ride's link
+  const t = state.trips.get(tripId);
+  if (!t) return;
+  return shareLink(btn, `Track this ${t.route} train live (to ${destName(t)}).`, rideUrl({ trip: tripId, route: t.route }));
+}
+async function shareLink(btn, text, url) {
   if (navigator.share) {
     try { await navigator.share({ title: "Simon's Subway", text, url }); return; } catch (err) { if (err.name === 'AbortError') return; }
   }
   try {
     await navigator.clipboard.writeText(`${text} ${url}`);
+    const label = btn.textContent;
     btn.textContent = 'Link copied';
-    setTimeout(() => { btn.textContent = 'Share tracker'; }, 2500);
+    setTimeout(() => { btn.textContent = label; }, 2500);
   } catch {
     toast(`Copy this link to share the train:<br><input class="copy" readonly value="${esc(url)}">`);
     toastEl.querySelector('input').select();
