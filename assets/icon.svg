@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1b2030"/><stop offset="1" stop-color="#0c0e14"/></linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#ffd54a" stop-opacity=".95"/><stop offset=".45" stop-color="#f2b705" stop-opacity=".45"/><stop offset="1" stop-color="#f2b705" stop-opacity="0"/></radialGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+  <g fill="none" stroke-linecap="round" stroke-width="58">
+    <path d="M-40 760 C 220 700, 300 520, 470 470 S 820 330, 1080 160" stroke="#2f6fd6"/>
+    <path d="M300 -40 C 330 260, 420 400, 512 512 S 700 820, 720 1080" stroke="#f07c22"/>
+    <path d="M-40 330 C 200 360, 380 600, 560 640 S 900 620, 1080 700" stroke="#3aa655"/>
+  </g>
+  <g stroke="#0c0e14" stroke-width="10" fill="#fff">
+    <circle cx="470" cy="470" r="26"/><circle cx="560" cy="640" r="26"/><circle cx="805" cy="360" r="22"/>
+  </g>
+  <circle cx="645" cy="400" r="190" fill="url(#glow)"/>
+  <g transform="translate(645 400) rotate(-28)">
+    <rect x="-92" y="-38" width="184" height="76" rx="22" fill="#ffc21a" stroke="#0c0e14" stroke-width="10"/>
+    <rect x="-62" y="-17" width="40" height="30" rx="6" fill="#0c0e14"/>
+    <rect x="-8" y="-17" width="40" height="30" rx="6" fill="#0c0e14"/>
+    <path d="M58 -17 h16 a8 8 0 0 1 8 8 v14 a8 8 0 0 1 -8 8 h-16 z" fill="#0c0e14"/>
+  </g>
+</svg>

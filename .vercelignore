@@ -5,3 +5,5 @@ dist
 scripts
 .git
 worker
+ios
+android

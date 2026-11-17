@@ -1,0 +1,8 @@
+{
+  "appId": "com.simonsoliloquy.subway",
+  "appName": "Simon's Subway",
+  "webDir": "dist",
+  "backgroundColor": "#f3eee3",
+  "ios": { "contentInset": "never" },
+  "android": { "allowMixedContent": false }
+}

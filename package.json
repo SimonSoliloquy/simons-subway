@@ -9,13 +9,18 @@
     "preview": "vite preview",
     "fetch": "sh scripts/fetch_raw.sh",
     "test": "node --test test/*.test.mjs",
-    "prebuild": "node --test test/*.test.mjs"
+    "prebuild": "node --test test/*.test.mjs",
+    "build:app": "vite build --mode app && cap sync"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.2",
+    "@capacitor/core": "^8.6.2",
+    "@capacitor/ios": "^8.6.2",
     "protobufjs": "^8.8.1",
     "three": "^0.187.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.6.2",
     "vite": "^8.3.8"
   },
   "description": "Simon's Subway: a live 3D map of the New York City subway"
