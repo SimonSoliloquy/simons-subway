@@ -55,3 +55,11 @@ test('ride tracking ships switched off', () => {
   assert.match(main, /const RIDES_ON = import\.meta\.env\.VITE_RIDES === 'on';/);
   for (const fn of ['loadRide', 'startRide', 'renderRide']) assert.ok(body(fn).includes('if (!RIDES_ON) return;'), `${fn} must check RIDES_ON`);
 });
+
+test('the × on your own live ride hides the card and never ends the ride', () => {
+  const src = readFileSync(new URL('../src/main.js', import.meta.url), 'utf8');
+  const hide = src.indexOf("b.id === 'ride-close' && state.ride && !state.ride.shared && !state.ride.ended");
+  const end = src.indexOf("if (b.id === 'ride-close' || b.id === 'ride-done') clearRide();");
+  assert.ok(hide > 0 && end > hide, 'the hide case must come before clearRide');
+  assert.match(src.slice(hide, end), /menuEl\.open = false;[^\n]*return;/);
+});

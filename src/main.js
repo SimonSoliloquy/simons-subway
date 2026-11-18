@@ -1632,7 +1632,7 @@ function renderRide() {
   const t = r.trip && state.trips.get(r.trip);
   if (t) { r.route = t.route; r.dir = t.dir; r.terminal = t.stus.at(-1)?.parent || r.terminal; r.lastLeft = t.stus.length; }
   const title = 'My train';
-  const head = `<div class="head">${r.route ? bullet(r.route) : ''}<div><h3>${title}</h3><div class="sub">${t ? `to ${esc(destName(t))} · ${t.dir === 'N' ? 'Northbound' : 'Southbound'}` : r.terminal ? `to ${esc(stName(r.terminal))}` : ''}</div></div><button class="close" id="ride-close" aria-label="${r.shared ? 'Stop tracking' : 'End ride'}">×</button></div>`;
+  const head = `<div class="head">${r.route ? bullet(r.route) : ''}<div><h3>${title}</h3><div class="sub">${t ? `to ${esc(destName(t))} · ${t.dir === 'N' ? 'Northbound' : 'Southbound'}` : r.terminal ? `to ${esc(stName(r.terminal))}` : ''}</div></div><button class="close" id="ride-close" aria-label="${r.shared ? 'Stop tracking' : r.ended ? 'Close' : 'Hide (the ride keeps going)'}">×</button></div>`;
   if (r.ended) {
     const e = r.ended, text = (END_TEXT[e.reason] || END_TEXT.expired)(e.station ? stName(e.station) : '');
     // the link stays up: an ended ride reads as a previous ride
@@ -1781,6 +1781,9 @@ rideEl.addEventListener('click', (e) => {
   if (!b) return;
   if (b.dataset.rideRoute) { ridePick = ridePick === b.dataset.rideRoute ? '' : b.dataset.rideRoute; renderRide(); return; }
   if (b.dataset.rideTrip) { ridePick = ''; startRide(b.dataset.rideTrip); return; }
+  // × on your own live ride only hides the card: it used to end the ride, and people tapped it
+  // to get back to the map (rides "stopped for no reason"). Ending is "I got off".
+  if (b.id === 'ride-close' && state.ride && !state.ride.shared && !state.ride.ended) { menuEl.open = false; updateMini(); return; }
   if (b.id === 'ride-close' || b.id === 'ride-done') clearRide();
   else if (b.id === 'ride-share') shareRide(b);
   else if (b.id === 'ride-show') { if (narrow()) menuEl.open = false; select({ kind: 'train', id: state.ride.trip }, { fly: true }); }
