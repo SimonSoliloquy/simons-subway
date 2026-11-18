@@ -13,7 +13,9 @@
 import protobuf from 'protobufjs';
 
 const SITE = (typeof import.meta !== 'undefined' && import.meta.env?.BASE_URL) || '/';
-const BASE = SITE + 'api/mta?feed=';
+// the store apps bundle the page but read the feeds from the live site's relay
+const API_ORIGIN = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_ORIGIN) || '';
+const BASE = (API_ORIGIN ? API_ORIGIN + '/' : SITE) + 'api/mta?feed=';
 export const TRIP_FEED_NAMES = ['gtfs', 'gtfs-ace', 'gtfs-bdfm', 'gtfs-g', 'gtfs-jz', 'gtfs-nqrw', 'gtfs-l'];
 export const TRIP_FEEDS = TRIP_FEED_NAMES.map((f) => BASE + f);
 export const ALERT_FEED = BASE + 'alerts';

@@ -1521,11 +1521,13 @@ function setRideDest(dest) {
   if (r.id && r.secret) ridesApi('/' + r.id, { secret: r.secret, dest: dest || null }).catch((err) => console.warn('destination not stored', err));
   if (dest) enableAlerts();
 }
+// links must open the website, also from the store apps (whose own origin is capacitor://localhost)
+const SITE_URL = import.meta.env.VITE_SITE_URL || `${location.origin}${location.pathname}`;
 const rideUrl = (r) => {
   const q = new URLSearchParams();
   if (r.id) q.set('ride', r.id);
   else { q.set('trip', r.trip); if (r.route) q.set('r', r.route); if (r.dest) q.set('to', r.dest); }
-  return `${location.origin}${location.pathname}?${q}`;
+  return `${SITE_URL}?${q}`;
 };
 
 /** Where the ride stands: phase 'wait' | 'riding' | 'near' | 'arrived' | 'last' | 'gone'. */

@@ -20,7 +20,13 @@ export const FEEDS = {
   ene: { path: 'nyct%2Fnyct_ene.json', type: 'application/json', ttl: 60 },
 };
 
+// the store apps (Capacitor) load the page from their own origin and read the feeds from here
+const APP_ORIGINS = new Set(['capacitor://localhost', 'https://localhost', 'ionic://localhost']);
+
 export default async function handler(req, res) {
+  const origin = req.headers?.origin;
+  res.setHeader('Vary', 'Origin');
+  if (origin && APP_ORIGINS.has(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
   const name = new URL(req.url, 'http://localhost').searchParams.get('feed');
   const feed = Object.hasOwn(FEEDS, name) ? FEEDS[name] : null;
   if (!feed) {

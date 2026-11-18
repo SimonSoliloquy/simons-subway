@@ -14,6 +14,7 @@
 const ORIGINS = [
   /^https:\/\/simons-subway(-[a-z0-9-]+)?\.vercel\.app$/,
   /^http:\/\/(localhost|127\.0\.0\.1):\d+$/,
+  /^(capacitor|ionic|https):\/\/localhost$/, // the store apps (Capacitor iOS / Android)
 ];
 const RIDE_TTL = 4 * 3600;          // seconds
 const CREATES_PER_HOUR = 30;        // per address

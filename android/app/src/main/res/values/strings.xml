@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Simon\'s Subway</string>
+    <string name="title_activity_main">Simon\'s Subway</string>
+    <string name="package_name">com.simonsoliloquy.subway</string>
+    <string name="custom_url_scheme">com.simonsoliloquy.subway</string>
+</resources>
