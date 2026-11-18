@@ -11,3 +11,7 @@ raw/*
 .env*
 
 worker/.wrangler/
+
+# iCloud Drive (Desktop) conflict copies like "splash 2.png"; never real files here
+* [2-9].*
+* [2-9]
