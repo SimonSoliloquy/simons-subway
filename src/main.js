@@ -2152,6 +2152,21 @@ async function refreshOutages() {
   } catch (err) { console.error(err); }
 }
 
+// A hidden page (another tab, a locked phone) makes no feed requests, to save the site's data
+// allowance; coming back refreshes whatever is due at once. The one exception: during a ride
+// with a stop still ahead, trips keep refreshing once a minute so the arrival alerts still fire.
+const HIDDEN_RIDE_REFRESH_MS = 60_000;
+const refreshes = [];
+const rideAlertsPending = () => { const r = state.ride; return !!(r && !r.ended && !r.shared && r.dest && !r.arrived); };
+function refreshEvery(fn, ms, hiddenMs = () => 0) { refreshes.push({ fn, ms, hiddenMs, last: Date.now() }); }
+function runRefreshes() {
+  const hidden = document.visibilityState === 'hidden', now = Date.now();
+  for (const r of refreshes) {
+    const gap = hidden ? r.hiddenMs() : r.ms;
+    if (gap && now - r.last >= gap) { r.last = now; r.fn(); }
+  }
+}
+
 // On a phone the station card covers the lower half of the screen, so the view is lifted
 // (camera view offset) to put the orbit target in the middle of the map that is still visible.
 let viewShift = 0;
@@ -2253,10 +2268,12 @@ async function start() {
   setInterval(tick, 1000);
   setStatus('Connecting to MTA feeds…');
   refreshOutages();
-  setInterval(refreshOutages, OUTAGE_REFRESH_MS);
   await initProtos();
   await Promise.all([refreshTrips(), refreshAlerts()]);
-  setInterval(refreshTrips, TRIP_REFRESH_MS);
-  setInterval(refreshAlerts, ALERT_REFRESH_MS);
+  refreshEvery(refreshOutages, OUTAGE_REFRESH_MS);
+  refreshEvery(refreshTrips, TRIP_REFRESH_MS, () => (rideAlertsPending() ? HIDDEN_RIDE_REFRESH_MS : 0));
+  refreshEvery(refreshAlerts, ALERT_REFRESH_MS);
+  setInterval(runRefreshes, 1000);
+  document.addEventListener('visibilitychange', runRefreshes);
 }
 start().catch((err) => { console.error(err); setStatus('Failed to start: ' + err.message, 'error'); });

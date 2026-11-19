@@ -4,6 +4,8 @@
 // servers, so the browser reads the feeds from here. Runs as a Vercel function in production
 // and as Vite middleware in development (see vite.config.js), so it uses only Node's own
 // request/response API.
+import { brotliCompressSync, gzipSync, constants as zlib } from 'node:zlib';
+
 const MTA = 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/';
 const trips = (name) => ({ path: 'nyct-v2%2F' + name, type: 'application/x-protobuf', ttl: 10 });
 
@@ -38,7 +40,17 @@ export default async function handler(req, res) {
   try {
     const upstream = await fetch(MTA + feed.path, { signal: AbortSignal.timeout(8000) });
     if (!upstream.ok) throw new Error('MTA responded ' + upstream.status);
-    const body = Buffer.from(await upstream.arrayBuffer());
+    let body = Buffer.from(await upstream.arrayBuffer());
+    // the CDN does not compress protobuf itself, and the feeds shrink about 7x (gtfs: 400 KB -> 55 KB)
+    const accept = String(req.headers?.['accept-encoding'] || '');
+    res.setHeader('Vary', 'Origin, Accept-Encoding');
+    if (/\bbr\b/.test(accept)) {
+      body = brotliCompressSync(body, { params: { [zlib.BROTLI_PARAM_QUALITY]: 5 } });
+      res.setHeader('Content-Encoding', 'br');
+    } else if (/\bgzip\b/.test(accept)) {
+      body = gzipSync(body, { level: 6 });
+      res.setHeader('Content-Encoding', 'gzip');
+    }
     res.statusCode = 200;
     res.setHeader('Content-Type', feed.type);
     res.setHeader('Cache-Control', `public, max-age=0, s-maxage=${feed.ttl}, stale-while-revalidate=${feed.ttl * 2}`);
