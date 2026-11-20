@@ -7,7 +7,7 @@
 import { brotliCompressSync, gzipSync, constants as zlib } from 'node:zlib';
 
 const MTA = 'https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/';
-const trips = (name) => ({ path: 'nyct-v2%2F' + name, type: 'application/x-protobuf', ttl: 30 });
+const trips = (name) => ({ path: 'nyct-v2%2F' + name, type: 'application/x-protobuf', ttl: 10 });
 
 // feed name -> upstream path, content type, seconds the CDN may reuse a response
 export const FEEDS = {
@@ -18,7 +18,7 @@ export const FEEDS = {
   'gtfs-jz': trips('gtfs-jz'),
   'gtfs-nqrw': trips('gtfs-nqrw'),
   'gtfs-l': trips('gtfs-l'),
-  alerts: { path: 'camsys%2Fsubway-alerts', type: 'application/x-protobuf', ttl: 60 },
+  alerts: { path: 'camsys%2Fsubway-alerts', type: 'application/x-protobuf', ttl: 20 },
   ene: { path: 'nyct%2Fnyct_ene.json', type: 'application/json', ttl: 60 },
 };
 
