@@ -31,8 +31,28 @@ const str = (v, re, name, optional = false) => {
 };
 const TRIP = /^[\w.~+-]{1,64}$/, ROUTE = /^[0-9A-Z]{1,3}$/, STOP = /^[0-9A-Z]{1,8}$/, ID = /^[0-9a-zA-Z]{10}$/;
 
+// Loop guard (Simon, 2026-11-24, after the 3D subway incident of 2026-11-15, when one looping page
+// used the account's whole 100,000/day free Workers allowance in under an hour): every client
+// (address) gets at most LOOP_GUARD's limit a minute across all routes, checked before any other
+// work, so a runaway loop gets 429s and the D1 behind it is never touched. Excelsior's self-check
+// (prod_watch) counts this Worker's 429s in Cloudflare analytics and raises a top card when it trips.
+async function loopGuard(request, env) {
+  if (!env.LOOP_GUARD) return null;
+  const who = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const { success } = await env.LOOP_GUARD.limit({ key: who });
+  if (success) return null;
+  const origin = request.headers.get('Origin');
+  return new Response(JSON.stringify({ error: 'too many requests: slow down' }), {
+    status: 429,
+    headers: { 'Content-Type': 'application/json', 'Retry-After': '60', 'X-Loop-Guard': 'tripped', 'Cache-Control': 'no-store',
+               ...(origin ? { 'Access-Control-Allow-Origin': origin, Vary: 'Origin' } : {}) },
+  });
+}
+
 export default {
   async fetch(request, env) {
+    const guarded = await loopGuard(request, env);
+    if (guarded) return guarded;
     const url = new URL(request.url);
     const origin = request.headers.get('Origin');
     const allowed = !!origin && ORIGINS.some((re) => re.test(origin));

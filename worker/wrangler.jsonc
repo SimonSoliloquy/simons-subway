@@ -6,6 +6,8 @@
   "account_id": "27acccc64187a6a9c27103eadb2eb10f",
   "workers_dev": true,
   "observability": { "enabled": true },
+  // LOOP_GUARD: at most 60 requests a minute per client, every route (Simon, 2026-11-24; see loopGuard).
+  "ratelimits": [{ "name": "LOOP_GUARD", "namespace_id": "1102", "simple": { "limit": 60, "period": 60 } }],
   // the same D1 database as the games' leaderboards Worker; this Worker only touches subway_rides,
   // and keeps its own migrations table so the two never step on each other's migration history
   "d1_databases": [
