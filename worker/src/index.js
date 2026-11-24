@@ -12,6 +12,7 @@
 // after it ends.
 
 const ORIGINS = [
+  /^https:\/\/simonsoliloquy\.com$/,                   // the page at simonsoliloquy.com/simons-subway/
   /^https:\/\/simons-subway(-[a-z0-9-]+)?\.vercel\.app$/,
   /^http:\/\/(localhost|127\.0\.0\.1):\d+$/,
   /^(capacitor|ionic|https):\/\/localhost$/, // the store apps (Capacitor iOS / Android)

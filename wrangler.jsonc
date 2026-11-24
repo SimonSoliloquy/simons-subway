@@ -1,0 +1,24 @@
+{
+  // Simon's Subway at https://simonsoliloquy.com/simons-subway/: the page and data are plain files
+  // (free; no Worker code runs for them), and only /simons-subway/api/* runs cf/worker.js, the MTA
+  // feed relay, rate-limited per address (see the note at the top of cf/worker.js).
+  // Cloudflare's GitHub build runs "sh tools/cf-build.sh" then "npx wrangler deploy" on every push
+  // to main. The rides Worker is separate: worker/wrangler.jsonc.
+  "name": "simons-subway",
+  "main": "cf/worker.js",
+  "compatibility_date": "2026-11-01",
+  "account_id": "27acccc64187a6a9c27103eadb2eb10f",
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "assets": {
+    "directory": "./.cf",
+    "binding": "ASSETS",
+    "not_found_handling": "404-page",
+    "run_worker_first": ["/simons-subway/api/*"]
+  },
+  "ratelimits": [{ "name": "FEEDS_LIMIT", "namespace_id": "1101", "simple": { "limit": 90, "period": 60 } }],
+  "routes": [
+    { "pattern": "simonsoliloquy.com/simons-subway", "zone_name": "simonsoliloquy.com" },
+    { "pattern": "simonsoliloquy.com/simons-subway/*", "zone_name": "simonsoliloquy.com" }
+  ]
+}
